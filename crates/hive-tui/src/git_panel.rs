@@ -340,7 +340,9 @@ impl App {
         if !self.git.visible || !self.git.rect.contains(pos) {
             return false;
         }
+        // Clicking the panel takes keyboard focus from the terminal too.
         self.git.focused = true;
+        self.mode = crate::app::Mode::Nav;
         let n = self.git.rows().len();
         match kind {
             MouseEventKind::ScrollUp => self.git.sel = self.git.sel.saturating_sub(1),
