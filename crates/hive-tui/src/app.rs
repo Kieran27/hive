@@ -105,6 +105,8 @@ pub struct App {
     pub vscode_opened: HashSet<PathBuf>,
     /// The source-control panel on the right.
     pub git: crate::git_panel::GitPanel,
+    /// A just-created project's session should take the keyboard when it opens.
+    enter_terminal_on_focus: bool,
     pub areas: Areas,
     /// Pane rects of the visible sessions (one, or one per run proc).
     pub pane_rects: Vec<(String, Rect)>,
@@ -150,6 +152,7 @@ impl App {
             sidebar_width,
             vscode_opened: HashSet::new(),
             git: Default::default(),
+            enter_terminal_on_focus: false,
             areas: Areas::default(),
             pane_rects: vec![],
             tab_hits: vec![],
@@ -513,7 +516,12 @@ impl App {
                     }
                 }
             }
-            ServerEvent::Focus { session } => self.focus_session(&session),
+            ServerEvent::Focus { session } => {
+                self.focus_session(&session);
+                if std::mem::take(&mut self.enter_terminal_on_focus) {
+                    self.mode = Mode::Terminal;
+                }
+            }
             ServerEvent::Toast { level, message } => self.toast(level, message),
             ServerEvent::Ok => {}
             ServerEvent::GitStatus(info) => self.git_on_status(info),
@@ -1172,6 +1180,10 @@ impl App {
             KeyCode::Char('n') => self.new_worktree(),
             KeyCode::Char('S') => self.setup_worktree(),
             KeyCode::Char('D') => self.delete_worktree(),
+            KeyCode::Char('N') => {
+                let dir = self.default_projects_dir();
+                self.overlay = Some(Overlay::NewProject(NewProjectForm::new(&dir)));
+            }
             KeyCode::Char('a') => {
                 let mut input = TextInput::default();
                 if let Ok(cwd) = std::env::current_dir() {
@@ -1654,6 +1666,37 @@ impl App {
                     self.overlay = Some(Overlay::Picker(picker));
                 }
             },
+            Overlay::NewProject(mut form) => {
+                if key.code == KeyCode::Enter {
+                    let name = form.name.value.trim().to_string();
+                    let parent = form.parent.value.trim().to_string();
+                    if name.is_empty() {
+                        form.error = Some("give the project a name".into());
+                        form.focus = 0;
+                        self.overlay = Some(Overlay::NewProject(form));
+                        return;
+                    }
+                    if parent.is_empty() {
+                        form.error = Some("choose where to create it".into());
+                        form.focus = 1;
+                        self.overlay = Some(Overlay::NewProject(form));
+                        return;
+                    }
+                    let open = open_choice_kind(form.open);
+                    self.enter_terminal_on_focus = open.is_some();
+                    let (cols, rows) = self.pane_size();
+                    self.send(ClientRequest::CreateProject(CreateProject {
+                        parent: PathBuf::from(parent),
+                        name,
+                        open,
+                        cols,
+                        rows,
+                    }));
+                } else {
+                    form.handle_key(&key);
+                    self.overlay = Some(Overlay::NewProject(form));
+                }
+            }
             Overlay::Wizard(mut w) => {
                 let submit = key.code == KeyCode::Enter && !w.enter_selects_suggestion();
                 if submit {
@@ -1720,6 +1763,19 @@ impl App {
             .filter(|s| s.project == p.id && s.kind.is_agent())
             .map(|s| s.status)
             .max()
+    }
+
+    /// Where `N` suggests creating projects: `projects_dir` from config, else
+    /// the parent of the most recently added project, else `~/code`.
+    pub fn default_projects_dir(&self) -> String {
+        if let Some(d) = &self.global.projects_dir {
+            return d.clone();
+        }
+        self.projects
+            .last()
+            .and_then(|p| p.root.parent())
+            .map(hive_core::paths::tildify)
+            .unwrap_or_else(|| "~/code".into())
     }
 
     pub fn anything_working(&self) -> bool {

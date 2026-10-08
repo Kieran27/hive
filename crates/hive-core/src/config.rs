@@ -23,6 +23,9 @@ pub struct GlobalConfig {
     pub shell: Option<String>,
     /// Extra project roots to show (projects added from the TUI live in the db).
     pub projects: Vec<String>,
+    /// Where `N` (new project) creates folders. Default: the parent folder of
+    /// the most recently added project, else `~/code`.
+    pub projects_dir: Option<String>,
     pub agents: AgentsConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,

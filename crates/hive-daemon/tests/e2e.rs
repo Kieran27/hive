@@ -476,6 +476,63 @@ cmd = "echo api-is-up-on-{{port.api}}; sleep 30"
     .await;
     assert!(!wt.exists());
 
+    // Create a brand-new project from scratch and open a shell in it.
+    let new_parent = home.join("repos");
+    c.send(ClientRequest::CreateProject(CreateProject {
+        parent: new_parent.clone(),
+        name: "fresh-idea".into(),
+        open: Some(SessionKind::Shell),
+        cols: 80,
+        rows: 24,
+    }))
+    .await;
+    let focused = c
+        .until(|e| {
+            if let ServerEvent::Focus { session } = e {
+                Some(session.clone())
+            } else {
+                None
+            }
+        })
+        .await;
+    assert!(new_parent.join("fresh-idea/.git").is_dir());
+    c.send(ClientRequest::Subscribe).await;
+    let (projects, sessions) = c
+        .until(|e| match e {
+            ServerEvent::Snapshot {
+                projects, sessions, ..
+            } => Some((projects.clone(), sessions.clone())),
+            _ => None,
+        })
+        .await;
+    let fresh = projects
+        .iter()
+        .find(|p| p.name == "fresh-idea")
+        .expect("project added");
+    assert_eq!(fresh.worktrees.len(), 1);
+    let s = sessions.iter().find(|s| s.id == focused).unwrap();
+    assert_eq!(s.project, fresh.id);
+    assert_eq!(s.kind, SessionKind::Shell);
+    // A second create with the same name is refused (folder not empty).
+    c.send(ClientRequest::CreateProject(CreateProject {
+        parent: new_parent.clone(),
+        name: "fresh-idea".into(),
+        open: None,
+        cols: 80,
+        rows: 24,
+    }))
+    .await;
+    let msg = c
+        .until(|e| match e {
+            ServerEvent::Toast {
+                level: ToastLevel::Error,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(msg.contains("already exists"), "{msg}");
+
     daemon.shutdown_all();
 }
 

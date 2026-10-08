@@ -16,6 +16,9 @@ pub enum ClientRequest {
     AddProject {
         path: PathBuf,
     },
+    /// Make a new folder, `git init` it, add it as a project and optionally
+    /// open an agent in it.
+    CreateProject(CreateProject),
     RemoveProject {
         project: String,
     },
@@ -122,6 +125,17 @@ pub enum ClientRequest {
         worktree: PathBuf,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProject {
+    /// Folder the project is created in.
+    pub parent: PathBuf,
+    pub name: String,
+    /// Session to open once it exists (`None` = just add it).
+    pub open: Option<SessionKind>,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

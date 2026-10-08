@@ -67,6 +67,7 @@ fn is_slow(req: &ClientRequest) -> bool {
             | ClientRequest::ListBranches { .. }
             | ClientRequest::StartRun(_)
             | ClientRequest::AddProject { .. }
+            | ClientRequest::CreateProject(_)
             | ClientRequest::ReloadConfig
             | ClientRequest::AskChoices { .. }
             | ClientRequest::OpenVscode { .. }

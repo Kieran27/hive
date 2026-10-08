@@ -24,6 +24,7 @@ pub enum Overlay {
     },
     Picker(Picker),
     Wizard(Wizard),
+    NewProject(NewProjectForm),
     /// Waiting on the daemon (e.g. resolving `choices_cmd`).
     Loading {
         pending: PendingRun,
@@ -43,6 +44,7 @@ impl Overlay {
             Overlay::Help { filter, .. } => Some(filter),
             Overlay::Picker(p) => Some(&mut p.filter),
             Overlay::Wizard(w) => w.focused_input(),
+            Overlay::NewProject(p) => p.focused_input(),
             _ => None,
         }
     }
@@ -311,6 +313,77 @@ impl PendingRun {
             self.answers.insert(a.name.clone(), value);
             self.idx += 1;
         }
+    }
+}
+
+// ---------------------------------------------------------------- new project
+
+/// What to open in a freshly created project.
+pub const OPEN_CHOICES: [&str; 4] = ["claude", "codex", "shell", "nothing"];
+
+pub fn open_choice_kind(i: usize) -> Option<SessionKind> {
+    match i {
+        0 => Some(SessionKind::Claude),
+        1 => Some(SessionKind::Codex),
+        2 => Some(SessionKind::Shell),
+        _ => None,
+    }
+}
+
+pub struct NewProjectForm {
+    pub name: TextInput,
+    pub parent: TextInput,
+    /// 0 name · 1 location · 2 open
+    pub focus: usize,
+    pub open: usize,
+    pub error: Option<String>,
+}
+
+impl NewProjectForm {
+    pub fn new(parent: &str) -> Self {
+        let mut p = TextInput::default();
+        p.set(parent);
+        Self {
+            name: TextInput::default(),
+            parent: p,
+            focus: 0,
+            open: 0,
+            error: None,
+        }
+    }
+
+    pub fn focused_input(&mut self) -> Option<&mut TextInput> {
+        match self.focus {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.parent),
+            _ => None,
+        }
+    }
+
+    pub fn handle_key(&mut self, key: &KeyEvent) {
+        self.error = None;
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % 3,
+            KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + 2) % 3,
+            KeyCode::Left | KeyCode::Right if self.focus == 2 => {
+                let n = OPEN_CHOICES.len();
+                self.open = if key.code == KeyCode::Right {
+                    (self.open + 1) % n
+                } else {
+                    (self.open + n - 1) % n
+                };
+            }
+            _ => {
+                if let Some(input) = self.focused_input() {
+                    input.handle_key(key);
+                }
+            }
+        }
+    }
+
+    /// Where the folder will be created, for the preview line.
+    pub fn target(&self) -> PathBuf {
+        hive_core::paths::expand_tilde(self.parent.value.trim()).join(self.name.value.trim())
     }
 }
 
@@ -647,6 +720,22 @@ impl Wizard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_project_form() {
+        let mut f = NewProjectForm::new("~/code");
+        for c in "my-app".chars() {
+            f.handle_key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(f.target().ends_with("code/my-app"));
+        f.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        f.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        f.handle_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(open_choice_kind(f.open), Some(SessionKind::Codex));
+        f.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        f.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(open_choice_kind(f.open), None);
+    }
 
     #[test]
     fn fuzzy() {

@@ -35,7 +35,7 @@ hive doctor                           # checks git, code, claude, codex, nvm, nc
 ## Quick start
 
 ```sh
-hive add ~/code/my-repo     # or press `a` inside hive
+hive add ~/code/my-repo     # or press `a` inside hive (N creates a brand-new project)
 hive                        # starts the daemon if needed and opens the TUI
 ```
 
@@ -61,6 +61,7 @@ hive has two modes. **NAV** is for moving around hive. **TERM** sends every key 
 | `e` | open (or focus) the worktree's VS Code window; marks it `[vscode]` |
 | `g` | source-control panel (press again to hide) |
 | `n` · `S` · `D` | new worktree (with setup) · re-run setup · remove/prune worktree |
+| `N` | new project: creates the folder, `git init` and a first commit, adds it, and opens Claude (or Codex / a shell) ready to go |
 | `w` · `u` | close tab (kills it) · resume an ended agent / restart a shell |
 | `a` · `X` | add / remove a project |
 | `pgup/pgdn` (`⇧` in TERM) | scroll back |
@@ -91,6 +92,7 @@ The mouse works too: click rows and tabs, click a pane to focus it, use the whee
 ```toml
 shell = "/bin/zsh"                 # default: $SHELL
 projects = ["~/code/other-repo"]   # extra projects (ones added with `a` live in the db)
+projects_dir = "~/code"            # where `N` creates new projects (default: next to your last project)
 
 [agents.claude]
 cmd = "claude"

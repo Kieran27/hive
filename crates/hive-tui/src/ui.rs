@@ -256,6 +256,10 @@ fn draw_sidebar(f: &mut Frame, app: &App) {
                 Span::raw(" add a git repo"),
             ]),
             Line::from(vec![
+                Span::styled("N", Style::default().fg(ACCENT).bold()),
+                Span::raw(" create a new project"),
+            ]),
+            Line::from(vec![
                 Span::styled("?", Style::default().fg(ACCENT).bold()),
                 Span::raw(" help"),
             ]),
@@ -810,6 +814,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         }
         Overlay::Picker(p) => draw_picker(f, p, area),
         Overlay::Wizard(w) => draw_wizard(f, w, area),
+        Overlay::NewProject(p) => draw_new_project(f, p, area),
         Overlay::Diff {
             title,
             lines,
@@ -1380,6 +1385,79 @@ fn draw_diff(f: &mut Frame, title: &str, lines: &[String], scroll: usize, area: 
     );
     f.render_widget(
         Paragraph::new(pos).style(Style::default().fg(DIM)),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
+}
+
+fn draw_new_project(f: &mut Frame, form: &NewProjectForm, area: Rect) {
+    let r = centered(area, 72, 10);
+    let inner = modal(f, r, "new project");
+    let label_w = 10u16;
+    let row = |i: u16| Rect {
+        x: inner.x + label_w,
+        y: inner.y + i,
+        width: inner.width.saturating_sub(label_w),
+        height: 1,
+    };
+    let label = |f: &mut Frame, i: u16, text: &str, on: bool| {
+        let style = if on {
+            Style::default().fg(ACCENT).bold()
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        f.render_widget(
+            Paragraph::new(text.to_string()).style(style),
+            Rect {
+                x: inner.x,
+                y: inner.y + i,
+                width: label_w,
+                height: 1,
+            },
+        );
+    };
+    label(f, 0, "name", form.focus == 0);
+    input_line(f, row(0), &form.name, form.focus == 0);
+    label(f, 1, "in", form.focus == 1);
+    input_line(f, row(1), &form.parent, form.focus == 1);
+    label(f, 2, "open", form.focus == 2);
+    let choice = OPEN_CHOICES[form.open];
+    let style = if form.focus == 2 {
+        Style::default().bg(SEL_BG)
+    } else {
+        Style::default()
+    };
+    f.render_widget(Paragraph::new(format!("‹ {choice} ›")).style(style), row(2));
+
+    let target = if form.name.value.trim().is_empty() {
+        "→ pick a name".to_string()
+    } else {
+        format!("→ {}  (git init, added to hive)", tildify(&form.target()))
+    };
+    f.render_widget(
+        Paragraph::new(target).style(Style::default().fg(DIM)),
+        Rect {
+            y: inner.y + 4,
+            height: 1,
+            ..inner
+        },
+    );
+    if let Some(e) = &form.error {
+        f.render_widget(
+            Paragraph::new(e.clone()).style(Style::default().fg(RED)),
+            Rect {
+                y: inner.y + 5,
+                height: 1,
+                ..inner
+            },
+        );
+    }
+    f.render_widget(
+        Paragraph::new("tab/↑↓ move · ←→ change · enter create · esc cancel")
+            .style(Style::default().fg(DIM)),
         Rect {
             y: inner.y + inner.height.saturating_sub(1),
             height: 1,

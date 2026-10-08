@@ -295,7 +295,7 @@ impl Daemon {
             .ok_or_else(|| anyhow!("unknown worktree {}", path.display()))
     }
 
-    async fn add_project(self: &Arc<Self>, path: PathBuf) -> Result<()> {
+    async fn add_project(self: &Arc<Self>, path: PathBuf) -> Result<String> {
         let path = if path.is_relative() {
             std::env::current_dir()?.join(path)
         } else {
@@ -309,7 +309,7 @@ impl Daemon {
                 bail!("{} is already added", root.display());
             }
             st.projects.push(Project {
-                id,
+                id: id.clone(),
                 cfg: ProjectConfig::load(&root),
                 worktrees: vec![],
                 base_branch: String::new(),
@@ -322,6 +322,72 @@ impl Daemon {
             ToastLevel::Info,
             format!("added {}", hive_core::paths::tildify(&root)),
         );
+        Ok(id)
+    }
+
+    /// New folder → `git init` (+ an empty first commit so worktrees can
+    /// branch from it) → project → optional agent session, focused.
+    async fn create_project(self: &Arc<Self>, req: CreateProject, reply: &Outbox) -> Result<()> {
+        let name = validate_project_name(&req.name)?;
+        let parent = hive_core::paths::expand_tilde(&req.parent.to_string_lossy());
+        let dir = parent.join(&name);
+        if dir.exists()
+            && std::fs::read_dir(&dir)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(true)
+        {
+            bail!(
+                "{} already exists and isn't empty",
+                hive_core::paths::tildify(&dir)
+            );
+        }
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let d2 = dir.clone();
+        let committed = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let run = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&d2)
+                    .args(args)
+                    .output()
+            };
+            let init = run(&["init", "-q", "-b", "main"])?;
+            if !init.status.success() {
+                bail!("git init: {}", String::from_utf8_lossy(&init.stderr).trim());
+            }
+            Ok(
+                run(&["commit", "-q", "--allow-empty", "-m", "Initial commit"])?
+                    .status
+                    .success(),
+            )
+        })
+        .await??;
+        if !committed {
+            self.toast(
+                ToastLevel::Warn,
+                "created without a first commit (set git user.name/user.email) — commit before making worktrees",
+            );
+        }
+        let id = self.add_project(dir).await?;
+        let Some(kind) = req.open else { return Ok(()) };
+        let worktree = {
+            let st = self.state.lock().unwrap();
+            st.projects
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.worktrees.first())
+                .map(|w| w.path.clone())
+        }
+        .ok_or_else(|| anyhow!("project added but its worktree wasn't found"))?;
+        let session = self.spawn_session(SpawnSession {
+            project: id,
+            worktree,
+            kind,
+            cwd: None,
+            cols: req.cols,
+            rows: req.rows,
+        })?;
+        let _ = reply.send(ServerEvent::Focus { session });
         Ok(())
     }
 
@@ -1096,7 +1162,10 @@ impl Daemon {
                 ClientRequest::Subscribe => {
                     let _ = reply.send(self.snapshot());
                 }
-                ClientRequest::AddProject { path } => self.add_project(path).await?,
+                ClientRequest::AddProject { path } => {
+                    self.add_project(path).await?;
+                }
+                ClientRequest::CreateProject(c) => self.create_project(c, reply).await?,
                 ClientRequest::RemoveProject { project } => self.remove_project(&project)?,
                 ClientRequest::ReloadConfig => self.reload_config().await,
                 ClientRequest::ListBranches { project } => {
@@ -1304,6 +1373,19 @@ pub fn project_info(p: &Project) -> ProjectInfo {
     }
 }
 
+/// A folder name for a new project: no path separators or leading dots.
+pub fn validate_project_name(name: &str) -> Result<String> {
+    let n = name.trim();
+    if n.is_empty() {
+        bail!("project name is empty");
+    }
+    if n.contains('/') || n.contains('\\') || n.starts_with('.') || n.chars().any(char::is_control)
+    {
+        bail!("project name can't contain / or start with a dot");
+    }
+    Ok(n.to_string())
+}
+
 fn stored_to_info(s: &StoredSession) -> SessionInfo {
     SessionInfo {
         id: s.id.clone(),
@@ -1333,5 +1415,20 @@ fn info_to_stored(i: &SessionInfo) -> StoredSession {
         agent_session: i.agent_session.clone(),
         last_prompt: i.last_prompt.clone(),
         created_at: i.created_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_names() {
+        assert_eq!(validate_project_name("  my-app ").unwrap(), "my-app");
+        assert!(validate_project_name("").is_err());
+        assert!(validate_project_name("a/b").is_err());
+        assert!(validate_project_name("..").is_err());
+        assert!(validate_project_name(".hidden").is_err());
+        assert_eq!(validate_project_name("My App 2").unwrap(), "My App 2");
     }
 }

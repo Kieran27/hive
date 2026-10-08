@@ -69,7 +69,16 @@ pub const GLOSSARY: &[Entry] = &[
     e("worktrees", "n", "new worktree (+ setup steps)"),
     e("worktrees", "S", "re-run setup steps"),
     e("worktrees", "D", "remove (or prune a missing) worktree"),
-    e("worktrees", "a  X", "add / remove a project"),
+    e(
+        "worktrees",
+        "N",
+        "create a new project (folder + git init + agent)",
+    ),
+    e(
+        "worktrees",
+        "a  X",
+        "add an existing repo / remove a project",
+    ),
     e("worktrees", "ctrl+r", "reload config files"),
     e("source control", "g", "open / focus / hide the panel"),
     e(
@@ -237,6 +246,7 @@ pub fn context_hints(app: &App) -> Vec<(String, String)> {
     match app.selected_row() {
         Some(Row::Project(_)) => {
             push("n", "new worktree");
+            push("N", "new project");
             push("space", "expand");
         }
         Some(Row::Worktree(..)) | Some(Row::Package(..)) => {
@@ -250,7 +260,10 @@ pub fn context_hints(app: &App) -> Vec<(String, String)> {
                 push("D", "remove wt");
             }
         }
-        None => push("a", "add project"),
+        None => {
+            push("N", "new project");
+            push("a", "add repo");
+        }
     }
     push("/", "jump");
     push("q", "quit");
