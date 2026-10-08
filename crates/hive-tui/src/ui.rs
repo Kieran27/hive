@@ -93,11 +93,13 @@ pub fn layout(app: &mut App, area: Rect) {
         app.git.list = Rect::default();
     }
     let footer_h = 4u16.min(sidebar.height.saturating_sub(3));
+    // The honeycomb's lower row sits on the first line inside the border.
+    let logo_h = u16::from(app.global.ui.logo);
     let tree = Rect {
         x: sidebar.x + 1,
-        y: sidebar.y + 1,
+        y: sidebar.y + 1 + logo_h,
         width: sidebar.width.saturating_sub(2),
-        height: sidebar.height.saturating_sub(2 + footer_h),
+        height: sidebar.height.saturating_sub(2 + footer_h + logo_h),
     };
     let header = Rect { height: 1, ..main };
     let tabs = Rect {
@@ -220,16 +222,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// The sidebar title: a row of filled hexagons (a tiny honeycomb) + name.
+/// A five-cell honeycomb after the name: hexagons 1, 3 and 5 sit in the
+/// border title, 2 and 4 drop into the gaps on the line below.
+const HONEYCOMB_TOP: &str = "⬢ ⬢ ⬢";
+const HONEYCOMB_BOTTOM: &str = "⬢ ⬢";
+
 fn sidebar_title(app: &App) -> Line<'static> {
     let amber = Style::default().fg(ACCENT);
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("hive", amber.add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+    ];
     if app.global.ui.logo {
-        spans.push(Span::styled("⬢⬢⬢⬢⬢", amber));
+        spans.push(Span::styled(HONEYCOMB_TOP, amber));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled("hive", amber.add_modifier(Modifier::BOLD)));
-    spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
@@ -242,6 +250,20 @@ fn draw_sidebar(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(if focused { ACCENT } else { DIM }))
         .title(sidebar_title(app));
     f.render_widget(block, a.sidebar);
+    if app.global.ui.logo && a.sidebar.width > 14 {
+        // The title " hive ⬢ ⬢ ⬢ " starts at x+1, putting the top hexagons
+        // at x+7, x+9, x+11; the lower two go in the gaps at x+8 and x+10.
+        let r = Rect {
+            x: a.sidebar.x + 8,
+            y: a.sidebar.y + 1,
+            width: 3,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(HONEYCOMB_BOTTOM).style(Style::default().fg(ACCENT)),
+            r,
+        );
+    }
 
     if app.projects.is_empty() {
         let msg = Paragraph::new(vec![
