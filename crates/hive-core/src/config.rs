@@ -85,7 +85,7 @@ pub struct UiConfig {
     /// macOS notification when an agent finishes or needs you.
     pub desktop_notifications: bool,
     pub mouse: bool,
-    /// The honeycomb logo at the top of the sidebar.
+    /// Hexagons before the name in the sidebar title.
     pub logo: bool,
 }
 

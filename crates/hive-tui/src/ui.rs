@@ -93,17 +93,11 @@ pub fn layout(app: &mut App, area: Rect) {
         app.git.list = Rect::default();
     }
     let footer_h = 4u16.min(sidebar.height.saturating_sub(3));
-    // The logo needs room: skip it on short or narrow terminals.
-    let logo_h = if show_logo(app, sidebar) {
-        LOGO.len() as u16 + 1
-    } else {
-        0
-    };
     let tree = Rect {
         x: sidebar.x + 1,
-        y: sidebar.y + 1 + logo_h,
+        y: sidebar.y + 1,
         width: sidebar.width.saturating_sub(2),
-        height: sidebar.height.saturating_sub(2 + footer_h + logo_h),
+        height: sidebar.height.saturating_sub(2 + footer_h),
     };
     let header = Rect { height: 1, ..main };
     let tabs = Rect {
@@ -226,70 +220,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Five interlocking hexagons: three on top, two nested below.
-const LOGO: [&str; 4] = [
-    " __    __    __",
-    "/  \\__/  \\__/  \\",
-    "\\__/  \\__/  \\__/",
-    "   \\__/  \\__/",
-];
-const LOGO_WIDTH: u16 = 16;
-
-fn show_logo(app: &App, sidebar: Rect) -> bool {
-    // Name beside it needs ~6 more columns; keep ≥ 8 tree rows.
-    app.global.ui.logo && sidebar.width >= LOGO_WIDTH + 9 && sidebar.height >= 4 + 1 + 4 + 2 + 8
-}
-
-fn draw_logo(f: &mut Frame, app: &App, area: Rect) {
-    let hex = Style::default().fg(ACCENT);
-    let name = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(DIM);
-    for (i, row) in LOGO.iter().enumerate() {
-        let mut spans = vec![Span::raw(" "), Span::styled(*row, hex)];
-        let pad = (LOGO_WIDTH as usize).saturating_sub(row.chars().count()) + 2;
-        match i {
-            1 => {
-                spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled("hive", name));
-            }
-            2 => {
-                let n = app.projects.len();
-                let w: usize = app.projects.iter().map(|p| p.worktrees.len()).sum();
-                spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(format!("{n}p · {w}wt"), dim));
-            }
-            _ => {}
-        }
-        let r = Rect {
-            y: area.y + i as u16,
-            height: 1,
-            ..area
-        };
-        f.render_widget(Paragraph::new(Line::from(spans)), r);
+/// The sidebar title: a row of filled hexagons (a tiny honeycomb) + name.
+fn sidebar_title(app: &App) -> Line<'static> {
+    let amber = Style::default().fg(ACCENT);
+    let mut spans = vec![Span::raw(" ")];
+    if app.global.ui.logo {
+        spans.push(Span::styled("⬢⬢⬢⬢⬢", amber));
+        spans.push(Span::raw(" "));
     }
+    spans.push(Span::styled("hive", amber.add_modifier(Modifier::BOLD)));
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App) {
     let a = app.areas;
     let focused = app.mode == Mode::Nav && app.overlay.is_none();
-    let logo = show_logo(app, a.sidebar);
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if focused { ACCENT } else { DIM }));
-    if !logo {
-        block = block.title(Span::styled(" hive ", Style::default().fg(ACCENT).bold()));
-    }
+        .border_style(Style::default().fg(if focused { ACCENT } else { DIM }))
+        .title(sidebar_title(app));
     f.render_widget(block, a.sidebar);
-    if logo {
-        let area = Rect {
-            x: a.sidebar.x + 1,
-            y: a.sidebar.y + 1,
-            width: a.sidebar.width.saturating_sub(2),
-            height: LOGO.len() as u16,
-        };
-        draw_logo(f, app, area);
-    }
 
     if app.projects.is_empty() {
         let msg = Paragraph::new(vec![
