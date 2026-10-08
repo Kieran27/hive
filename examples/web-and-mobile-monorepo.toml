@@ -1,0 +1,145 @@
+# Example hive config for a monorepo with two web apps (a shell that loads a
+# second app at runtime via module federation) plus an Expo mobile app.
+#
+# Save it as ~/.config/hive/projects/<repo-dir-name>.toml, or commit it to the
+# repo as .hive.toml to share it.
+
+[project]
+name = "acme-app"
+worktree_root = "~/code/acme-app-worktrees"
+base_branch = "develop"
+port_stride = 10                 # worktree slot N: shell 3000+10N, store 4000+10N, metro 8081+10N
+copy_from_main = []              # gitignored files at the repo root, e.g. [".env"]
+
+[node]
+nvm = true
+default_version = "18"           # used unless a step/run pins its own `node`
+
+[[package]]
+name = "shell"
+path = "apps/shell"
+
+[[package]]
+name = "store"
+path = "apps/store"
+
+[[package]]
+name = "ui"
+path = "libs/ui"
+
+[[package]]
+name = "mobile"
+path = "apps/mobile"
+copy_from_main = [".env.local"]  # gitignored secrets, copied into new worktrees
+
+[vscode]
+folders = ["."]                  # or e.g. ["@mobile"] to open just one package
+
+# ---------------------------------------------------------------- setup
+# Offered as a checklist after `n` (new worktree) or `S` (re-run setup),
+# pre-checked from the branch's profile.
+
+[[setup_step]]
+id = "install-web"
+label = "yarn install (web workspaces)"
+cmd = "yarn install"
+
+[[setup_step]]
+id = "install-mobile"
+label = "yarn install (mobile)"
+cwd = "@mobile"
+node = "22"                      # Expo needs a newer node than the web apps
+cmd = "yarn install"
+
+[[setup_step]]
+id = "env"
+label = "yarn env:{env} (expo prebuild)"
+cwd = "@mobile"
+node = "22"
+cmd = "yarn env:{env}"           # {env} choices come from the package's env:* scripts
+
+[[setup_step]]
+id = "ios"
+label = "yarn ios (build + install on a device)"
+cwd = "@mobile"
+node = "22"
+cmd = "yarn ios"
+
+# First matching profile wins; the last one is the fallback.
+[[profile]]
+name = "feature"
+match = ["develop", "feature/*", "fix/*", "chore/*", "hotfix/*"]
+env = "staging"
+steps = ["install-web", "install-mobile", "env"]
+
+[[profile]]
+name = "native"
+match = ["native/*", "native-*"]
+env = "staging"
+steps = ["install-mobile", "env", "ios"]
+
+[[profile]]
+name = "release"
+match = ["main", "release/*"]
+env = "prod"
+steps = ["install-web", "install-mobile", "env"]
+
+[[profile]]
+name = "default"
+match = ["*"]
+env = "staging"
+steps = ["install-web", "install-mobile", "env"]
+
+# ---------------------------------------------------------------- runs
+
+# The shell loads the store app at runtime, so both run together and the
+# shell is pointed at this worktree's store. Each dev server must read its
+# port from PORT (e.g. `server.port: Number(process.env.PORT) || 3000`).
+[[run]]
+name = "web"
+env = { BROWSER = "none" }
+[[run.ask]]
+name = "script"
+prompt = "start script"
+default = "start"
+choices = ["start", "start:prod"]
+[[run.proc]]
+name = "store"
+cwd = "@store"
+port = 4000
+cmd = "PORT={port} yarn {script}"
+[[run.proc]]
+name = "shell"
+cwd = "@shell"
+port = 3000
+wait_for_port = "store"          # start once the store accepts connections
+cmd = "PORT={port} STORE_URL=http://localhost:{port.store} yarn {script}"
+
+[[run]]
+name = "metro"
+cwd = "@mobile"
+node = "22"
+port = 8081
+cmd = "npx expo start --dev-client --port {port}"
+
+[[run]]
+name = "ios"
+cwd = "@mobile"
+node = "22"
+port = 8081
+cmd = "npx expo run:ios --device \"{device}\" --port {port}"
+[[run.ask]]
+name = "device"
+prompt = "iOS simulator"
+choices_cmd = "xcrun simctl list devices available | grep -E '^ +(iPhone|iPad)' | sed -E 's/^ +//; s/ \\([0-9A-F-]{36}\\).*//'"
+
+[[run]]
+name = "android"
+cwd = "@mobile"
+node = "22"
+port = 8081
+cmd = "npx expo run:android --device \"{device}\" --port {port}"
+[[run.ask]]
+name = "device"
+prompt = "Android device / emulator"
+choices_cmd = "emulator -list-avds 2>/dev/null; adb devices 2>/dev/null | tail -n +2 | cut -f1"
