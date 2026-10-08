@@ -85,6 +85,8 @@ pub struct UiConfig {
     /// macOS notification when an agent finishes or needs you.
     pub desktop_notifications: bool,
     pub mouse: bool,
+    /// The honeycomb logo at the top of the sidebar.
+    pub logo: bool,
 }
 
 impl Default for UiConfig {
@@ -93,6 +95,7 @@ impl Default for UiConfig {
             sidebar_width: 34,
             desktop_notifications: false,
             mouse: true,
+            logo: true,
         }
     }
 }

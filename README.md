@@ -113,6 +113,7 @@ claude = "C"                       #   new_worktree setup remove_worktree add_pr
 sidebar_width = 34
 desktop_notifications = false      # macOS notification when an agent finishes / needs you
 mouse = true
+logo = true                         # honeycomb logo atop the sidebar (auto-hides when short)
 ```
 
 ### Per project: `<repo>/.hive.toml` or `~/.config/hive/projects/<repo-dir-name>.toml`
