@@ -284,6 +284,7 @@ pub const NAV_ACTIONS: &[(&str, &str)] = &[
     ("quit", "q"),
     ("quit_stop_daemon", "Q"),
     ("reload", "ctrl+r"),
+    ("source_control", "g"),
 ];
 
 /// A user binding (`"C"`, `"ctrl+o"`, `"f2"`) → the key event of the action's

@@ -73,6 +73,20 @@ fn is_slow(req: &ClientRequest) -> bool {
     )
 }
 
+/// Git requests run off the read loop but strictly in order, so "stage,
+/// then commit" (or several quick stage presses) can't overtake each other.
+fn is_git(req: &ClientRequest) -> bool {
+    matches!(
+        req,
+        ClientRequest::GitStatus { .. }
+            | ClientRequest::GitStage { .. }
+            | ClientRequest::GitUnstage { .. }
+            | ClientRequest::GitDiscard { .. }
+            | ClientRequest::GitDiff { .. }
+            | ClientRequest::GitCommit { .. }
+    )
+}
+
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -87,6 +101,16 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let mut client_id = None;
     let mut attached: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut size = (120u16, 40u16);
+    let (git_tx, mut git_rx) = mpsc::unbounded_channel::<ClientRequest>();
+    let git_worker = {
+        let d = daemon.clone();
+        let t = tx.clone();
+        tokio::spawn(async move {
+            while let Some(req) = git_rx.recv().await {
+                d.handle(req, &t, (0, 0)).await;
+            }
+        })
+    };
 
     while let Some(req) = read_frame::<_, ClientRequest>(&mut rd).await? {
         match req {
@@ -133,6 +157,9 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 let _ = session;
                 daemon.handle(req, &tx, size).await;
             }
+            req if is_git(&req) => {
+                let _ = git_tx.send(req);
+            }
             req if is_slow(&req) => {
                 let d = daemon.clone();
                 let t = tx.clone();
@@ -145,6 +172,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     for (_, h) in attached {
         h.abort();
     }
+    drop(git_tx);
+    let _ = git_worker.await;
     if let Some(id) = client_id {
         daemon.remove_client(id);
     }

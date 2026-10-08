@@ -20,6 +20,7 @@ Run every git worktree from one terminal window. Each worktree gets its own Clau
 
 - **Left:** projects, with their worktrees and the packages inside each worktree. Status dots roll up from the agents: `⠹` working, `◐` waiting for you, `✓` done. `▶` means a dev server is running and `✗` means a process failed.
 - **Right:** one tab per session in the selected worktree. Run targets with several processes, such as a web app plus the API or micro-frontend it loads, share one tab split into panes.
+- **Source control (`g`):** a panel on the right lists the worktree's changes as **Staged** and **Changes**. You can stage or unstage single files, view diffs, discard changes and commit only what's staged, so local tweaks stay out of the commit.
 - **Sessions survive quitting.** A background daemon owns every process. Quitting the TUI (`q`) leaves them running, and the next `hive` re-attaches with scrollback.
 
 Inspired by [Nebula](https://github.com/AgentSystemLabs/nebula). hive uses the same daemon + thin ratatui client design and the same PTY handling (vt100 replay ring, kitty keyboard, frame pacing). It is arranged around worktree → package → session, and adds run targets with ports per worktree, setup pipelines and VS Code windows.
@@ -56,6 +57,7 @@ hive has two modes. **NAV** is for moving around hive. **TERM** sends every key 
 | `.` | jump to the next session that is waiting or done |
 | `/` | fuzzy-jump to any worktree or session |
 | `e` | open (or focus) the worktree's VS Code window; marks it `[vscode]` |
+| `g` | source-control panel (press again to hide) |
 | `n` · `S` · `D` | new worktree (with setup) · re-run setup · remove/prune worktree |
 | `w` · `u` | close tab (kills it) · resume an ended agent / restart a shell |
 | `a` · `X` | add / remove a project |
@@ -63,6 +65,20 @@ hive has two modes. **NAV** is for moving around hive. **TERM** sends every key 
 | `<` `>` | sidebar width |
 | `ctrl+r` | reload config |
 | `q` · `Q` | quit (everything keeps running) · quit and stop the daemon |
+
+**In the source-control panel:**
+
+| key | action |
+|---|---|
+| `j/k` | move |
+| `space` | stage or unstage the file; on a section header, all of that section |
+| `a` · `u` | stage all changes · unstage everything |
+| `enter` (or click a selected file) | diff, in a scrollable view |
+| `c` | commit the staged files (asks for a message) |
+| `x` | discard unstaged changes to the file, after a confirm; untracked files are deleted |
+| `r` · `esc` · `g` | refresh · back to the tree · hide |
+
+Commits run `git commit` through your login shell with the project's node version, so pre-commit hooks (husky, lint-staged…) behave as they do in a terminal. If a hook fails, its output opens in the diff view. The panel refreshes every 2 seconds while it's open.
 
 The mouse works too: click rows and tabs, click a pane to focus it, use the wheel to scroll, and drag the sidebar's right border to resize it. When an app in a pane copies with OSC 52 (for example over SSH), the text goes to the macOS clipboard. Mouse events are forwarded to apps that ask for them. To select text natively, hold Shift (Ghostty, iTerm2).
 

@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod git;
 pub mod ports;
 pub mod pty;
+pub mod scm;
 pub mod server;
 pub mod status;
 pub mod store;

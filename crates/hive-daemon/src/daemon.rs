@@ -51,6 +51,8 @@ pub struct Daemon {
     next_client: AtomicU64,
     pub hive_bin: PathBuf,
     pub shutdown: tokio::sync::Notify,
+    /// Serialises git operations across clients (avoids index.lock races).
+    git_lock: tokio::sync::Mutex<()>,
 }
 
 impl Daemon {
@@ -67,6 +69,7 @@ impl Daemon {
             next_client: AtomicU64::new(1),
             hive_bin,
             shutdown: tokio::sync::Notify::new(),
+            git_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -982,6 +985,101 @@ impl Daemon {
         Ok(choices)
     }
 
+    // ------------------------------------------------------------ source control
+
+    /// The project config owning a known worktree (requests for paths hive
+    /// doesn't manage are refused).
+    fn cfg_for_worktree(&self, worktree: &Path) -> Result<ProjectConfig> {
+        let st = self.state.lock().unwrap();
+        st.projects
+            .iter()
+            .find(|p| p.worktrees.iter().any(|w| w.path == worktree))
+            .map(|p| p.cfg.clone())
+            .ok_or_else(|| anyhow!("unknown worktree {}", worktree.display()))
+    }
+
+    async fn git_op<T: Send + 'static>(
+        &self,
+        worktree: &Path,
+        f: impl FnOnce(&Path) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.cfg_for_worktree(worktree)?;
+        let wt = worktree.to_path_buf();
+        let _guard = self.git_lock.lock().await;
+        tokio::task::spawn_blocking(move || f(&wt)).await?
+    }
+
+    async fn send_git_status(self: &Arc<Self>, worktree: &Path, reply: &Outbox) -> Result<()> {
+        let info = self.git_op(worktree, crate::scm::status).await?;
+        let _ = reply.send(ServerEvent::GitStatus(info));
+        Ok(())
+    }
+
+    /// After a change: fresh status for the panel, and the sidebar's dirty
+    /// marker in the background.
+    async fn after_git_change(self: &Arc<Self>, worktree: &Path, reply: &Outbox) -> Result<()> {
+        self.send_git_status(worktree, reply).await?;
+        let me = self.clone();
+        tokio::spawn(async move { me.refresh_all(true).await });
+        Ok(())
+    }
+
+    async fn git_commit(
+        self: &Arc<Self>,
+        worktree: &Path,
+        message: &str,
+        reply: &Outbox,
+    ) -> Result<()> {
+        let cfg = self.cfg_for_worktree(worktree)?;
+        if message.trim().is_empty() {
+            bail!("commit message is empty");
+        }
+        let staged = self
+            .git_op(worktree, crate::scm::status)
+            .await?
+            .files
+            .iter()
+            .any(|f| f.staged.is_some());
+        if !staged {
+            bail!("nothing staged — stage files with space first");
+        }
+        let dir = hive_core::paths::state_dir().join("commit-msgs");
+        std::fs::create_dir_all(&dir)?;
+        let msg_file = dir.join(format!("{}.txt", hive_core::new_id()));
+        std::fs::write(&msg_file, message)?;
+        // Through a login shell with the project's node, so hooks (husky,
+        // lint-staged…) find the same tools as in a terminal.
+        let script = format!(
+            "{}git commit -F {}",
+            commands::nvm_prelude(&cfg.node, None),
+            hive_core::template::shell_quote(&msg_file.display().to_string())
+        );
+        let shell = self.global.read().unwrap().shell();
+        let wt = worktree.to_path_buf();
+        self.toast(ToastLevel::Info, "committing…");
+        let guard = self.git_lock.lock().await;
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(shell)
+                .args(["-l", "-c", &script])
+                .current_dir(&wt)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(std::process::Stdio::null())
+                .output()
+        })
+        .await??;
+        drop(guard);
+        let _ = std::fs::remove_file(&msg_file);
+        let ok = out.status.success();
+        let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+        output.push_str(&String::from_utf8_lossy(&out.stderr));
+        let _ = reply.send(ServerEvent::GitCommitted {
+            worktree: worktree.to_path_buf(),
+            ok,
+            output,
+        });
+        self.after_git_change(worktree, reply).await
+    }
+
     // ------------------------------------------------------------ dispatch
 
     /// Handle one request. Attach/Detach are handled by the connection.
@@ -1075,6 +1173,43 @@ impl Daemon {
                 ClientRequest::Shutdown => {
                     self.shutdown_all();
                     self.shutdown.notify_waiters();
+                }
+                ClientRequest::GitStatus { worktree } => {
+                    self.send_git_status(&worktree, reply).await?
+                }
+                ClientRequest::GitStage { worktree, paths } => {
+                    self.git_op(&worktree, move |w| crate::scm::stage(w, &paths))
+                        .await?;
+                    self.after_git_change(&worktree, reply).await?;
+                }
+                ClientRequest::GitUnstage { worktree, paths } => {
+                    self.git_op(&worktree, move |w| crate::scm::unstage(w, &paths))
+                        .await?;
+                    self.after_git_change(&worktree, reply).await?;
+                }
+                ClientRequest::GitDiscard { worktree, paths } => {
+                    self.git_op(&worktree, move |w| crate::scm::discard(w, &paths))
+                        .await?;
+                    self.after_git_change(&worktree, reply).await?;
+                }
+                ClientRequest::GitDiff {
+                    worktree,
+                    path,
+                    staged,
+                } => {
+                    let p = path.clone();
+                    let text = self
+                        .git_op(&worktree, move |w| crate::scm::diff(w, &p, staged))
+                        .await?;
+                    let _ = reply.send(ServerEvent::GitDiff {
+                        worktree,
+                        path,
+                        staged,
+                        text,
+                    });
+                }
+                ClientRequest::GitCommit { worktree, message } => {
+                    self.git_commit(&worktree, &message, reply).await?
                 }
                 ClientRequest::Attach { .. } | ClientRequest::Detach { .. } => {}
             }

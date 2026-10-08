@@ -70,7 +70,28 @@ pub fn layout(app: &mut App, area: Rect) {
         .constraints([Constraint::Length(sw), Constraint::Min(10)])
         .split(rows[0]);
     let sidebar = cols[0];
-    let main = cols[1];
+    let mut main = cols[1];
+    // Source-control panel on the right.
+    if app.git.visible && main.width > 60 {
+        let gw = (main.width / 3).clamp(30, 56);
+        let rect = Rect {
+            x: main.x + main.width - gw,
+            width: gw,
+            ..main
+        };
+        main.width -= gw;
+        app.git.rect = rect;
+        // Border, a branch line on top, two hint lines at the bottom.
+        app.git.list = Rect {
+            x: rect.x + 1,
+            y: rect.y + 2,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(5),
+        };
+    } else {
+        app.git.rect = Rect::default();
+        app.git.list = Rect::default();
+    }
     let footer_h = 4u16.min(sidebar.height.saturating_sub(3));
     let tree = Rect {
         x: sidebar.x + 1,
@@ -190,6 +211,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     layout(app, area);
     draw_sidebar(f, app);
     draw_main(f, app);
+    if app.git.rect.width > 0 {
+        draw_git_panel(f, app);
+    }
     draw_status(f, app);
     if app.overlay.is_some() {
         draw_overlay(f, app, area);
@@ -664,8 +688,19 @@ fn draw_status(f: &mut Frame, app: &App) {
         };
         spans.push(Span::styled(msg.clone(), Style::default().fg(c)));
     } else {
+        let git_focus = app.git.visible && app.git.focused;
         let hints: &[(&str, &str)] = match (app.mode, app.overlay.is_some()) {
             (_, true) => &[("esc", "close")],
+            (Mode::Nav, _) if git_focus => &[
+                ("space", "stage/unstage"),
+                ("a", "stage all"),
+                ("u", "unstage all"),
+                ("enter", "diff"),
+                ("c", "commit"),
+                ("x", "discard"),
+                ("esc", "back"),
+                ("g", "hide"),
+            ],
             (Mode::Terminal, _) => &[],
             (Mode::Nav, _) => &[
                 ("c", "claude"),
@@ -674,6 +709,7 @@ fn draw_status(f: &mut Frame, app: &App) {
                 ("r", "run"),
                 ("n", "new wt"),
                 ("e", "vscode"),
+                ("g", "git"),
                 (".", "next"),
                 ("/", "jump"),
                 ("?", "help"),
@@ -785,6 +821,11 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         }
         Overlay::Picker(p) => draw_picker(f, p, area),
         Overlay::Wizard(w) => draw_wizard(f, w, area),
+        Overlay::Diff {
+            title,
+            lines,
+            scroll,
+        } => draw_diff(f, title, lines, *scroll, area),
     }
 }
 
@@ -1045,6 +1086,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                 ("1-9 tab ⇧tab".into(), "switch tabs"),
                 ("[ ]".into(), "switch process in a run tab"),
                 (".".into(), "next session that needs you"),
+                ("g".into(), "source control panel"),
                 ("/".into(), "jump to worktree / session"),
                 ("pgup/pgdn".into(), "scroll terminal"),
                 ("< >".into(), "sidebar width"),
@@ -1078,6 +1120,20 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             ],
         ),
         (
+            "source control (g)",
+            vec![
+                (
+                    "space · a · u".into(),
+                    "stage/unstage file or section · stage all · unstage all",
+                ),
+                (
+                    "enter · c · x".into(),
+                    "diff · commit staged · discard unstaged",
+                ),
+                ("esc · g".into(), "back to the tree · hide the panel"),
+            ],
+        ),
+        (
             "terminal mode",
             vec![
                 (unlock, "back to navigation"),
@@ -1086,7 +1142,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ),
     ];
     let h = sections.iter().map(|s| s.1.len() as u16 + 2).sum::<u16>() + 1;
-    let r = centered(area, 72, h);
+    let r = centered(area, 84, h);
     let inner = modal(f, r, "help");
     let mut lines = Vec::new();
     for (title, items) in sections {
@@ -1103,4 +1159,252 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn status_letter(c: char) -> Span<'static> {
+    let color = match c {
+        'M' => ACCENT,
+        'A' | '?' => GREEN,
+        'D' => RED,
+        'R' | 'C' => BLUE,
+        'U' => MAGENTA,
+        _ => Color::Gray,
+    };
+    let shown = if c == '?' { 'U' } else { c };
+    Span::styled(
+        shown.to_string(),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn draw_git_panel(f: &mut Frame, app: &mut App) {
+    use crate::git_panel::{GitRow, Section};
+    let rect = app.git.rect;
+    let focused = app.git.focused && app.mode == Mode::Nav && app.overlay.is_none();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { ACCENT } else { DIM }))
+        .title(Span::styled(
+            " source control ",
+            Style::default()
+                .fg(if focused { ACCENT } else { Color::Gray })
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block, rect);
+    let inner = Rect {
+        x: rect.x + 1,
+        y: rect.y + 1,
+        width: rect.width.saturating_sub(2),
+        height: rect.height.saturating_sub(2),
+    };
+    if inner.height < 4 {
+        return;
+    }
+
+    // Branch line.
+    let head = match &app.git.status {
+        None => Line::from(Span::styled("loading…", Style::default().fg(DIM))),
+        Some(st) => {
+            let mut spans = vec![Span::styled(
+                format!(
+                    " {}",
+                    st.branch.clone().unwrap_or_else(|| "detached HEAD".into())
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            )];
+            if st.ahead > 0 {
+                spans.push(Span::styled(
+                    format!(" ↑{}", st.ahead),
+                    Style::default().fg(GREEN),
+                ));
+            }
+            if st.behind > 0 {
+                spans.push(Span::styled(
+                    format!(" ↓{}", st.behind),
+                    Style::default().fg(ACCENT),
+                ));
+            }
+            if st.upstream.is_none() && st.branch.is_some() {
+                spans.push(Span::styled("  (no upstream)", Style::default().fg(DIM)));
+            }
+            Line::from(spans)
+        }
+    };
+    f.render_widget(Paragraph::new(head), Rect { height: 1, ..inner });
+
+    // File list.
+    let list = app.git.list;
+    let rows = app.git.rows();
+    let h = list.height as usize;
+    if app.git.sel < app.git.offset {
+        app.git.offset = app.git.sel;
+    } else if h > 0 && app.git.sel >= app.git.offset + h {
+        app.git.offset = app.git.sel + 1 - h;
+    }
+    let offset = app.git.offset;
+    for (i, row) in rows.iter().enumerate().skip(offset).take(h) {
+        let y = list.y + (i - offset) as u16;
+        let selected = i == app.git.sel;
+        let line = match *row {
+            GitRow::Header(sec) => {
+                let n = app.git.files(sec).len();
+                let label = match sec {
+                    Section::Staged => "STAGED",
+                    Section::Changes => "CHANGES",
+                };
+                let mut spans = vec![Span::styled(
+                    format!("{label} ({n})"),
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if sec == Section::Changes
+                    && n == 0
+                    && app.git.status.is_some()
+                    && app.git.files(Section::Staged).is_empty()
+                {
+                    spans.push(Span::styled(
+                        "  nothing to commit",
+                        Style::default().fg(DIM),
+                    ));
+                }
+                Line::from(spans)
+            }
+            GitRow::File(sec, idx) => {
+                let Some(file) = app.git.file(idx) else {
+                    continue;
+                };
+                let letter = match sec {
+                    Section::Staged => file.staged,
+                    Section::Changes => file.unstaged,
+                }
+                .unwrap_or(' ');
+                let (dir, name) = match file.path.rsplit_once('/') {
+                    Some((d, n)) => (format!(" {d}"), n.to_string()),
+                    None => (String::new(), file.path.clone()),
+                };
+                let mut spans = vec![Span::raw("  "), status_letter(letter), Span::raw(" ")];
+                let name_style = if file.conflicted() {
+                    Style::default().fg(MAGENTA)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(name, name_style));
+                if let Some(orig) = &file.orig_path {
+                    spans.push(Span::styled(format!(" ← {orig}"), Style::default().fg(DIM)));
+                }
+                spans.push(Span::styled(dir, Style::default().fg(DIM)));
+                Line::from(spans)
+            }
+        };
+        let style = if selected && (focused || app.git.visible) {
+            let base = Style::default().bg(SEL_BG);
+            if focused {
+                base.add_modifier(Modifier::BOLD)
+            } else {
+                base
+            }
+        } else {
+            Style::default()
+        };
+        f.render_widget(
+            Paragraph::new(line).style(style),
+            Rect {
+                y,
+                height: 1,
+                ..list
+            },
+        );
+    }
+
+    // Hints.
+    let hints_y = inner.y + inner.height - 2;
+    let key =
+        |k: &'static str| Span::styled(k, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
+    let dim = |t: &'static str| Span::styled(t, Style::default().fg(DIM));
+    let l1 = Line::from(vec![
+        key("space"),
+        dim(" stage  "),
+        key("⏎"),
+        dim(" diff  "),
+        key("c"),
+        dim(" commit"),
+    ]);
+    let l2 = if focused {
+        Line::from(vec![
+            key("a"),
+            dim("/"),
+            key("u"),
+            dim(" all  "),
+            key("x"),
+            dim(" discard  "),
+            key("esc"),
+            dim(" back"),
+        ])
+    } else {
+        Line::from(vec![key("g"), dim(" focus panel")])
+    };
+    f.render_widget(
+        Paragraph::new(vec![l1, l2]),
+        Rect {
+            y: hints_y,
+            height: 2,
+            ..inner
+        },
+    );
+}
+
+fn draw_diff(f: &mut Frame, title: &str, lines: &[String], scroll: usize, area: Rect) {
+    let r = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(3),
+    };
+    let inner = modal(f, r, title);
+    let h = inner.height.saturating_sub(1) as usize;
+    let body: Vec<Line> = lines
+        .iter()
+        .skip(scroll)
+        .take(h)
+        .map(|l| {
+            let style = if l.starts_with("+++")
+                || l.starts_with("---")
+                || l.starts_with("diff ")
+                || l.starts_with("index ")
+            {
+                Style::default().fg(DIM)
+            } else if l.starts_with('+') {
+                Style::default().fg(GREEN)
+            } else if l.starts_with('-') {
+                Style::default().fg(RED)
+            } else if l.starts_with("@@") {
+                Style::default().fg(BLUE)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(l.replace('\t', "    "), style))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(body),
+        Rect {
+            height: h as u16,
+            ..inner
+        },
+    );
+    let pos = format!(
+        "j/k scroll · space/u page · g/G top/bottom · esc close   {}/{}",
+        (scroll + 1).min(lines.len().max(1)),
+        lines.len()
+    );
+    f.render_widget(
+        Paragraph::new(pos).style(Style::default().fg(DIM)),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
 }

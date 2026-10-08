@@ -3,6 +3,7 @@
 pub mod app;
 pub mod client;
 pub mod event_loop;
+pub mod git_panel;
 pub mod keys;
 pub mod overlay;
 pub mod term;

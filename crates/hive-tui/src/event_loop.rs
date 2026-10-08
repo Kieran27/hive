@@ -143,6 +143,7 @@ where
                     app.dirty = true;
                 }
                 app.save_ui(false);
+                app.git_tick(false);
             }
         }
     }
@@ -160,5 +161,6 @@ where
         ratatui::layout::Rect::new(0, 0, size.width, size.height),
     );
     app.sync_attachments();
+    app.git_tick(false);
     Ok(())
 }

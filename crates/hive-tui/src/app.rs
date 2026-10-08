@@ -76,6 +76,8 @@ struct UiState {
     sidebar_width: Option<u16>,
     #[serde(default)]
     vscode: Vec<String>,
+    #[serde(default)]
+    git_panel: bool,
 }
 
 pub struct App {
@@ -101,6 +103,8 @@ pub struct App {
     pub sidebar_width: u16,
     /// Worktrees whose VS Code window hive has opened (the `[vscode]` badge).
     pub vscode_opened: HashSet<PathBuf>,
+    /// The source-control panel on the right.
+    pub git: crate::git_panel::GitPanel,
     pub areas: Areas,
     /// Pane rects of the visible sessions (one, or one per run proc).
     pub pane_rects: Vec<(String, Rect)>,
@@ -110,7 +114,7 @@ pub struct App {
     pub tick: u64,
     pub connected: bool,
     seen_status: HashMap<String, Status>,
-    ui_dirty: bool,
+    pub ui_dirty: bool,
     last_ui_save: Instant,
     pending_focus: Option<String>,
     snapshot_received: bool,
@@ -145,6 +149,7 @@ impl App {
             toast,
             sidebar_width,
             vscode_opened: HashSet::new(),
+            git: Default::default(),
             areas: Areas::default(),
             pane_rects: vec![],
             tab_hits: vec![],
@@ -511,6 +516,34 @@ impl App {
             ServerEvent::Focus { session } => self.focus_session(&session),
             ServerEvent::Toast { level, message } => self.toast(level, message),
             ServerEvent::Ok => {}
+            ServerEvent::GitStatus(info) => self.git_on_status(info),
+            ServerEvent::GitDiff {
+                path, staged, text, ..
+            } => {
+                let side = if staged { "staged" } else { "changes" };
+                self.overlay = Some(Overlay::Diff {
+                    title: format!("{path} ({side})"),
+                    lines: text.lines().map(String::from).collect(),
+                    scroll: 0,
+                });
+            }
+            ServerEvent::GitCommitted { ok, output, .. } => {
+                if ok {
+                    let summary = output
+                        .lines()
+                        .find(|l| l.starts_with('['))
+                        .unwrap_or("committed")
+                        .to_string();
+                    self.toast(ToastLevel::Info, summary);
+                } else {
+                    self.toast(ToastLevel::Error, "commit failed — see output");
+                    self.overlay = Some(Overlay::Diff {
+                        title: "commit failed".into(),
+                        lines: output.lines().map(String::from).collect(),
+                        scroll: 0,
+                    });
+                }
+            }
         }
     }
 
@@ -569,6 +602,7 @@ impl App {
             .map(|(k, v)| (PathBuf::from(k), v))
             .collect();
         self.vscode_opened = st.vscode.iter().map(PathBuf::from).collect();
+        self.git.visible = st.git_panel;
         if let Some(w) = st.sidebar_width {
             self.sidebar_width = w;
         }
@@ -591,6 +625,7 @@ impl App {
                 .map(|(k, v)| (k.display().to_string(), v.clone()))
                 .collect(),
             sidebar_width: Some(self.sidebar_width),
+            git_panel: self.git.visible,
             vscode: self
                 .vscode_opened
                 .iter()
@@ -1025,6 +1060,9 @@ impl App {
                 self.send(ClientRequest::Shutdown);
                 self.quit = true;
             }
+            Action::GitDiscard { worktree, paths } => {
+                self.send(ClientRequest::GitDiscard { worktree, paths });
+            }
         }
     }
 
@@ -1093,6 +1131,9 @@ impl App {
             .find(|(b, _)| matches_exact(&key, b))
             .map(|(_, to)| *to)
             .unwrap_or(key);
+        if self.git.visible && self.git.focused && self.git_key(key) {
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
@@ -1103,7 +1144,8 @@ impl App {
             KeyCode::Char(_) if ctrl || alt => {}
             KeyCode::Char('j') | KeyCode::Down => self.move_sel(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_sel(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.sel = 0,
+            KeyCode::Char('g') => self.git_toggle(),
+            KeyCode::Home => self.sel = 0,
             KeyCode::Char('G') | KeyCode::End => self.sel = self.rows.len().saturating_sub(1),
             KeyCode::Char('l') | KeyCode::Right => self.set_expanded(true),
             KeyCode::Char('h') | KeyCode::Left => self.collapse_or_parent(),
@@ -1333,6 +1375,12 @@ impl App {
             }
             _ => {}
         }
+        if self.git_mouse(ev.kind, ev.column, ev.row) {
+            return;
+        }
+        if matches!(ev.kind, MouseEventKind::Down(_)) {
+            self.git.focused = false;
+        }
         // Terminal panes.
         if let Some((id, rect)) = self
             .pane_rects
@@ -1477,6 +1525,31 @@ impl App {
         }
         match overlay {
             Overlay::Help | Overlay::Loading { .. } => {}
+            Overlay::Diff {
+                title,
+                lines,
+                mut scroll,
+            } => {
+                let page = self.areas.pane.height.max(4) as usize;
+                let max = lines.len().saturating_sub(1);
+                match key.code {
+                    KeyCode::Char('q') => return,
+                    KeyCode::Char('j') | KeyCode::Down => scroll = (scroll + 1).min(max),
+                    KeyCode::Char('k') | KeyCode::Up => scroll = scroll.saturating_sub(1),
+                    KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('d') => {
+                        scroll = (scroll + page).min(max)
+                    }
+                    KeyCode::PageUp | KeyCode::Char('u') => scroll = scroll.saturating_sub(page),
+                    KeyCode::Char('g') | KeyCode::Home => scroll = 0,
+                    KeyCode::Char('G') | KeyCode::End => scroll = max,
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::Diff {
+                    title,
+                    lines,
+                    scroll,
+                });
+            }
             Overlay::Confirm { msg, action } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.run_action(action),
                 KeyCode::Char('n') | KeyCode::Char('N') => {}
@@ -1499,6 +1572,19 @@ impl App {
                         InputAction::Ask(mut pending) => {
                             pending.answer(value);
                             self.advance_run(pending);
+                        }
+                        InputAction::Commit { worktree } => {
+                            if value.is_empty() {
+                                self.toast(
+                                    ToastLevel::Warn,
+                                    "empty commit message — nothing committed",
+                                );
+                            } else {
+                                self.send(ClientRequest::GitCommit {
+                                    worktree,
+                                    message: value,
+                                });
+                            }
                         }
                     }
                 } else {

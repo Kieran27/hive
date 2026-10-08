@@ -9,7 +9,7 @@ pub mod sanitize;
 pub mod template;
 
 /// Bumped whenever `protocol` changes shape; the TUI refuses a mismatched daemon.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub fn new_id() -> String {
     ulid::Ulid::new().to_string().to_lowercase()

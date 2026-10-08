@@ -24,6 +24,12 @@ pub enum Overlay {
     Loading {
         pending: PendingRun,
     },
+    /// A scrollable diff (or commit hook output).
+    Diff {
+        title: String,
+        lines: Vec<String>,
+        scroll: usize,
+    },
 }
 
 impl Overlay {
@@ -46,11 +52,16 @@ pub enum Action {
     },
     RemoveProject(String),
     QuitAndStop,
+    GitDiscard {
+        worktree: PathBuf,
+        paths: Vec<String>,
+    },
 }
 
 pub enum InputAction {
     AddProject,
     Ask(PendingRun),
+    Commit { worktree: PathBuf },
 }
 
 pub enum PickAction {

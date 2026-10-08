@@ -216,6 +216,134 @@ cmd = "echo api-is-up-on-{{port.api}}; sleep 30"
     })
     .await;
 
+    // Source control: stage one of two changes, commit only that one.
+    std::fs::write(repo.join("feature.txt"), "wanted\n").unwrap();
+    std::fs::write(
+        repo.join(".hive.toml"),
+        std::fs::read_to_string(repo.join(".hive.toml")).unwrap() + "\n# local tweak\n",
+    )
+    .unwrap();
+    c.send(ClientRequest::GitStatus {
+        worktree: main_wt.clone(),
+    })
+    .await;
+    let st = c
+        .until(|e| match e {
+            ServerEvent::GitStatus(s) => Some(s.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(st.branch.as_deref(), Some("main"));
+    let paths: Vec<&str> = st.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(
+        paths.contains(&"feature.txt") && paths.contains(&".hive.toml"),
+        "{paths:?}"
+    );
+    c.send(ClientRequest::GitStage {
+        worktree: main_wt.clone(),
+        paths: vec!["feature.txt".into()],
+    })
+    .await;
+    c.until(|e| match e {
+        ServerEvent::GitStatus(s)
+            if s.files
+                .iter()
+                .any(|f| f.path == "feature.txt" && f.staged == Some('A')) =>
+        {
+            Some(())
+        }
+        _ => None,
+    })
+    .await;
+    c.send(ClientRequest::GitCommit {
+        worktree: main_wt.clone(),
+        message: "add feature".into(),
+    })
+    .await;
+    let (ok, output) = c
+        .until(|e| match e {
+            ServerEvent::GitCommitted { ok, output, .. } => Some((*ok, output.clone())),
+            _ => None,
+        })
+        .await;
+    assert!(ok, "{output}");
+    let st = c
+        .until(|e| match e {
+            ServerEvent::GitStatus(s) => Some(s.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(
+        !st.files.iter().any(|f| f.path == "feature.txt"),
+        "committed"
+    );
+    assert!(
+        st.files
+            .iter()
+            .any(|f| f.path == ".hive.toml" && f.unstaged == Some('M') && f.staged.is_none()),
+        "local tweak untouched"
+    );
+    let last = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "show",
+            "--stat",
+            "--format=%s",
+            "HEAD",
+        ])
+        .output()
+        .unwrap();
+    let last = String::from_utf8_lossy(&last.stdout).to_string();
+    assert!(
+        last.starts_with("add feature")
+            && last.contains("feature.txt")
+            && !last.contains(".hive.toml"),
+        "{last}"
+    );
+
+    // A failing pre-commit hook is reported with its output.
+    std::fs::write(
+        repo.join(".git/hooks/pre-commit"),
+        "#!/bin/sh\necho 'lint: 2 problems' >&2\nexit 1\n",
+    )
+    .unwrap();
+    sh(&repo, "chmod +x .git/hooks/pre-commit");
+    c.send(ClientRequest::GitStage {
+        worktree: main_wt.clone(),
+        paths: vec![".hive.toml".into()],
+    })
+    .await;
+    c.send(ClientRequest::GitCommit {
+        worktree: main_wt.clone(),
+        message: "tweak".into(),
+    })
+    .await;
+    let (ok, output) = c
+        .until(|e| match e {
+            ServerEvent::GitCommitted { ok, output, .. } => Some((*ok, output.clone())),
+            _ => None,
+        })
+        .await;
+    assert!(!ok && output.contains("lint: 2 problems"), "{output}");
+    std::fs::remove_file(repo.join(".git/hooks/pre-commit")).unwrap();
+    // Undo the tweak so the rest of the flow starts clean.
+    c.send(ClientRequest::GitUnstage {
+        worktree: main_wt.clone(),
+        paths: vec![".hive.toml".into()],
+    })
+    .await;
+    c.send(ClientRequest::GitDiscard {
+        worktree: main_wt.clone(),
+        paths: vec![".hive.toml".into()],
+    })
+    .await;
+    c.until(|e| match e {
+        ServerEvent::GitStatus(s) if !s.files.iter().any(|f| f.path == ".hive.toml") => Some(()),
+        _ => None,
+    })
+    .await;
+
     // New worktree with setup + copied file.
     c.send(ClientRequest::CreateWorktree(CreateWorktree {
         project: project.id.clone(),

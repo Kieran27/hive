@@ -95,6 +95,33 @@ pub enum ClientRequest {
         name: String,
     },
     Shutdown,
+    /// Source control for one worktree.
+    GitStatus {
+        worktree: PathBuf,
+    },
+    GitStage {
+        worktree: PathBuf,
+        paths: Vec<String>,
+    },
+    GitUnstage {
+        worktree: PathBuf,
+        paths: Vec<String>,
+    },
+    /// Throw away unstaged changes (and delete untracked files).
+    GitDiscard {
+        worktree: PathBuf,
+        paths: Vec<String>,
+    },
+    GitDiff {
+        worktree: PathBuf,
+        path: String,
+        staged: bool,
+    },
+    /// Commit what is staged, running hooks through the project's shell/node.
+    GitCommit {
+        worktree: PathBuf,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +269,53 @@ pub enum ServerEvent {
         message: String,
     },
     Ok,
+    GitStatus(GitStatusInfo),
+    GitDiff {
+        worktree: PathBuf,
+        path: String,
+        staged: bool,
+        text: String,
+    },
+    /// A commit finished; `output` is the git/hook output (shown on failure).
+    GitCommitted {
+        worktree: PathBuf,
+        ok: bool,
+        output: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GitStatusInfo {
+    pub worktree: PathBuf,
+    /// Current branch (None when detached).
+    pub branch: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub files: Vec<GitFile>,
+}
+
+/// One path from `git status`: `staged` / `unstaged` hold the porcelain
+/// status letter for each side (`M`, `A`, `D`, `R`, `?` for untracked…).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GitFile {
+    pub path: String,
+    pub orig_path: Option<String>,
+    pub staged: Option<char>,
+    pub unstaged: Option<char>,
+}
+
+impl GitFile {
+    pub fn untracked(&self) -> bool {
+        self.unstaged == Some('?')
+    }
+
+    pub fn conflicted(&self) -> bool {
+        matches!(
+            (self.staged, self.unstaged),
+            (Some('U'), _) | (_, Some('U')) | (Some('A'), Some('A')) | (Some('D'), Some('D'))
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

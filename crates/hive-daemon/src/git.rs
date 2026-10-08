@@ -22,6 +22,9 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Polling must never take .git/index.lock, or it would race the
+        // user's own git commands (and ours).
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .with_context(|| format!("running git {}", args.join(" ")))?;
     if !out.status.success() {
