@@ -688,41 +688,13 @@ fn draw_status(f: &mut Frame, app: &App) {
         };
         spans.push(Span::styled(msg.clone(), Style::default().fg(c)));
     } else {
-        let git_focus = app.git.visible && app.git.focused;
-        let hints: &[(&str, &str)] = match (app.mode, app.overlay.is_some()) {
-            (_, true) => &[("esc", "close")],
-            (Mode::Nav, _) if git_focus => &[
-                ("space", "stage/unstage"),
-                ("a", "stage all"),
-                ("u", "unstage all"),
-                ("enter", "diff"),
-                ("c", "commit"),
-                ("x", "discard"),
-                ("esc", "back"),
-                ("g", "hide"),
-            ],
-            (Mode::Terminal, _) => &[],
-            (Mode::Nav, _) => &[
-                ("c", "claude"),
-                ("x", "codex"),
-                ("t", "shell"),
-                ("r", "run"),
-                ("n", "new wt"),
-                ("e", "vscode"),
-                ("g", "git"),
-                (".", "next"),
-                ("/", "jump"),
-                ("?", "help"),
-            ],
-        };
-        if app.mode == Mode::Terminal && app.overlay.is_none() {
-            spans.push(Span::styled(
-                format!("{} back to nav · shift+pgup scroll", app.unlock_label()),
-                Style::default().fg(DIM),
-            ));
-        }
+        let used: usize = spans.iter().map(|sp| sp.content.chars().count()).sum();
+        let hints = crate::help::fit(
+            crate::help::context_hints(app),
+            (a.width as usize).saturating_sub(used),
+        );
         for (k, v) in hints {
-            spans.push(Span::styled(*k, Style::default().fg(ACCENT).bold()));
+            spans.push(Span::styled(k, Style::default().fg(ACCENT).bold()));
             spans.push(Span::styled(format!(" {v}  "), Style::default().fg(DIM)));
         }
     }
@@ -783,7 +755,7 @@ fn input_line(f: &mut Frame, r: Rect, input: &TextInput, focused: bool) {
 fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     let Some(o) = &app.overlay else { return };
     match o {
-        Overlay::Help => draw_help(f, app, area),
+        Overlay::Help { filter, scroll } => draw_help(f, app, filter, *scroll, area),
         Overlay::Loading { pending } => {
             let r = centered(area, 50, 3);
             let inner = modal(f, r, &format!("run {}", pending.target));
@@ -1074,93 +1046,83 @@ fn draw_wizard(f: &mut Frame, w: &Wizard, area: Rect) {
     );
 }
 
-fn draw_help(f: &mut Frame, app: &App, area: Rect) {
-    let unlock = app.unlock_label();
-    let sections: Vec<(&str, Vec<(String, &str)>)> = vec![
-        (
-            "navigate",
-            vec![
-                ("j/k ↑↓".into(), "move"),
-                ("h/l ←→ space".into(), "collapse / expand"),
-                ("enter".into(), "focus terminal (or open a shell)"),
-                ("1-9 tab ⇧tab".into(), "switch tabs"),
-                ("[ ]".into(), "switch process in a run tab"),
-                (".".into(), "next session that needs you"),
-                ("g".into(), "source control panel"),
-                ("/".into(), "jump to worktree / session"),
-                ("pgup/pgdn".into(), "scroll terminal"),
-                ("< >".into(), "sidebar width"),
-            ],
-        ),
-        (
-            "sessions",
-            vec![
-                (
-                    "c / x / t".into(),
-                    "claude / codex / shell (in selected package)",
-                ),
-                ("r".into(), "run a target  ·  R restart  ·  s stop"),
-                ("w".into(), "close tab (kills it)"),
-                ("u".into(), "resume ended agent / restart shell"),
-                ("e".into(), "open worktree in VS Code"),
-            ],
-        ),
-        (
-            "worktrees & projects",
-            vec![
-                ("n".into(), "new worktree (+ setup)"),
-                ("S".into(), "re-run setup steps"),
-                ("D".into(), "remove worktree"),
-                ("a / X".into(), "add / remove project"),
-                ("ctrl+r".into(), "reload config"),
-                (
-                    "q / Q".into(),
-                    "quit (sessions keep running) / quit + stop daemon",
-                ),
-            ],
-        ),
-        (
-            "source control (g)",
-            vec![
-                (
-                    "space · a · u".into(),
-                    "stage/unstage file or section · stage all · unstage all",
-                ),
-                (
-                    "enter · c · x".into(),
-                    "diff · commit staged · discard unstaged",
-                ),
-                ("esc · g".into(), "back to the tree · hide the panel"),
-            ],
-        ),
-        (
-            "terminal mode",
-            vec![
-                (unlock, "back to navigation"),
-                ("shift+pgup/pgdn".into(), "scroll"),
-            ],
-        ),
-    ];
-    let h = sections.iter().map(|s| s.1.len() as u16 + 2).sum::<u16>() + 1;
-    let r = centered(area, 84, h);
-    let inner = modal(f, r, "help");
-    let mut lines = Vec::new();
-    for (title, items) in sections {
-        lines.push(Line::from(Span::styled(
-            title,
-            Style::default().fg(ACCENT).bold(),
-        )));
-        for (k, v) in items {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<18}"), Style::default().bold()),
-                Span::styled(v, Style::default().fg(Color::Gray)),
-            ]));
+fn draw_help(f: &mut Frame, app: &App, filter: &TextInput, scroll: usize, area: Rect) {
+    let results = crate::help::search(&filter.value, &app.unlock_label());
+    // Group under section headers.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut last = "";
+    for (section, keys, desc) in &results {
+        if *section != last {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                *section,
+                Style::default().fg(ACCENT).bold(),
+            )));
+            last = section;
         }
-        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {keys:<26}"), Style::default().bold()),
+            Span::styled(*desc, Style::default().fg(Color::Gray)),
+        ]));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    if results.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching keys",
+            Style::default().fg(DIM),
+        )));
+    }
+    let r = centered(area, 90, area.height.saturating_sub(4));
+    let inner = modal(f, r, "keys — type to search");
+    let search = Rect { height: 1, ..inner };
+    let prompt = Rect { width: 2, ..search };
+    f.render_widget(
+        Paragraph::new("/ ").style(Style::default().fg(ACCENT)),
+        prompt,
+    );
+    input_line(
+        f,
+        Rect {
+            x: search.x + 2,
+            width: search.width.saturating_sub(2),
+            ..search
+        },
+        filter,
+        true,
+    );
+    let body = Rect {
+        y: inner.y + 2,
+        height: inner.height.saturating_sub(3),
+        ..inner
+    };
+    let max_scroll = lines.len().saturating_sub(body.height as usize);
+    let scroll = scroll.min(max_scroll);
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(body.height as usize)
+        .collect();
+    f.render_widget(Paragraph::new(visible), body);
+    let more = if max_scroll > scroll {
+        "  ↓ more (↑↓ / pgdn)"
+    } else {
+        ""
+    };
+    f.render_widget(
+        Paragraph::new(format!(
+            "{} of {} keys{more} · esc close",
+            results.len(),
+            crate::help::GLOSSARY.len()
+        ))
+        .style(Style::default().fg(DIM)),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
 }
-
 fn status_letter(c: char) -> Span<'static> {
     let color = match c {
         'M' => ACCENT,

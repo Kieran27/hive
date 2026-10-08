@@ -8,7 +8,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hive_core::protocol::*;
 
 pub enum Overlay {
-    Help,
+    /// The searchable key glossary.
+    Help {
+        filter: TextInput,
+        scroll: usize,
+    },
     Confirm {
         msg: String,
         action: Action,
@@ -36,6 +40,7 @@ impl Overlay {
     pub fn text_input(&mut self) -> Option<&mut TextInput> {
         match self {
             Overlay::Input { input, .. } => Some(input),
+            Overlay::Help { filter, .. } => Some(filter),
             Overlay::Picker(p) => Some(&mut p.filter),
             Overlay::Wizard(w) => w.focused_input(),
             _ => None,
@@ -56,6 +61,15 @@ pub enum Action {
         worktree: PathBuf,
         paths: Vec<String>,
     },
+}
+
+impl Overlay {
+    pub fn help() -> Self {
+        Overlay::Help {
+            filter: TextInput::default(),
+            scroll: 0,
+        }
+    }
 }
 
 pub enum InputAction {

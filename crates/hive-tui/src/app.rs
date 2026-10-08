@@ -1209,7 +1209,7 @@ impl App {
             KeyCode::Char('u') => self.resume_active(),
             KeyCode::Char('.') => self.next_attention(),
             KeyCode::Char('/') => self.open_palette(),
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('?') => self.overlay = Some(Overlay::help()),
             KeyCode::Char('[') => self.cycle_group_focus(-1),
             KeyCode::Char(']') => self.cycle_group_focus(1),
             KeyCode::Tab => self.cycle_tab(1),
@@ -1524,7 +1524,25 @@ impl App {
             return;
         }
         match overlay {
-            Overlay::Help | Overlay::Loading { .. } => {}
+            Overlay::Loading { .. } => {}
+            Overlay::Help {
+                mut filter,
+                mut scroll,
+            } => {
+                let page = self.areas.pane.height.max(4) as usize;
+                match key.code {
+                    KeyCode::Down => scroll += 1,
+                    KeyCode::Up => scroll = scroll.saturating_sub(1),
+                    KeyCode::PageDown => scroll += page,
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(page),
+                    _ => {
+                        if filter.handle_key(&key) {
+                            scroll = 0;
+                        }
+                    }
+                }
+                self.overlay = Some(Overlay::Help { filter, scroll });
+            }
             Overlay::Diff {
                 title,
                 lines,

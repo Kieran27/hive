@@ -321,7 +321,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left | KeyCode::Tab => {
                 self.git.focused = false
             }
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('?') => self.overlay = Some(Overlay::help()),
             _ => return false,
         }
         self.dirty = true;

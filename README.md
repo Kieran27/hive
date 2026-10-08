@@ -45,6 +45,8 @@ A repo with no config still works: you get worktrees, agents and shells. Package
 
 ## Keys
 
+The bottom bar always shows the keys that make sense right now, for example `u resume` on an ended agent or `s stop` on a dev server. Press **`?`** for the full list of keys and status symbols, and type to search it (e.g. `close`, `stage`, `scroll`).
+
 hive has two modes. **NAV** is for moving around hive. **TERM** sends every key to the focused terminal, and `ctrl+q` (configurable) returns to NAV.
 
 | key | NAV action |
