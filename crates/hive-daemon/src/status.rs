@@ -59,6 +59,21 @@ pub fn interpret(agent: &str, event: &str, payload: &Value, current: Status) -> 
     u
 }
 
+/// A keypress that interrupts an agent's turn: Esc or Ctrl-C, legacy or
+/// kitty-encoded. Neither agent fires a hook when the user cancels.
+pub fn is_interrupt(data: &[u8]) -> bool {
+    matches!(
+        data,
+        b"\x1b"
+            | b"\x03"
+            | b"\x1b[27u"
+            | b"\x1b[27;1u"
+            | b"\x1b[27;1:1u"
+            | b"\x1b[99;5u"
+            | b"\x1b[99;5:1u"
+    )
+}
+
 /// A one-line title from a prompt.
 pub fn title_from_prompt(prompt: &str) -> String {
     let line = prompt
@@ -131,6 +146,16 @@ mod tests {
         assert_eq!(u.status, Some(Status::Done));
         assert_eq!(u.agent_session.as_deref(), Some("t"));
         assert_eq!(u.prompt.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn interrupts() {
+        assert!(is_interrupt(b"\x1b"));
+        assert!(is_interrupt(b"\x03"));
+        assert!(is_interrupt(b"\x1b[27u"));
+        assert!(!is_interrupt(b"\x1b[A"));
+        assert!(!is_interrupt(b"\x1b[27;5u"));
+        assert!(!is_interrupt(b"q"));
     }
 
     #[test]

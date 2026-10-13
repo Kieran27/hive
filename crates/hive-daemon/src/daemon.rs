@@ -674,7 +674,7 @@ impl Daemon {
     }
 
     fn input(&self, id: &str, data: Vec<u8>) {
-        let (pty, is_codex_submit) = {
+        let (pty, changed) = {
             let mut st = self.state.lock().unwrap();
             let Some(s) = st.sessions.iter_mut().find(|s| s.info.id == id) else {
                 return;
@@ -684,15 +684,24 @@ impl Daemon {
                 && s.info.alive
                 && data.contains(&b'\r')
                 && s.info.status != Status::Working;
+            // No agent reports a cancelled turn, so Esc / Ctrl-C mid-turn
+            // ends it here. (Claude flips back on its next tool use if the
+            // key didn't actually interrupt.)
+            let cancel = s.info.kind.is_agent()
+                && s.info.alive
+                && matches!(s.info.status, Status::Working | Status::Waiting)
+                && status::is_interrupt(&data);
             if submit {
                 s.info.status = Status::Working;
+            } else if cancel {
+                s.info.status = Status::Idle;
             }
-            (s.pty.clone(), submit)
+            (s.pty.clone(), submit || cancel)
         };
         if let Some(p) = pty {
             p.write(data);
         }
-        if is_codex_submit {
+        if changed {
             self.upsert(id);
         }
     }
