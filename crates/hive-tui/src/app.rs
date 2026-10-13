@@ -1494,6 +1494,11 @@ impl App {
         ) {
             return;
         }
+        // Any click on the sidebar takes focus back from the terminal.
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) && self.areas.sidebar.contains(pos) {
+            self.mode = Mode::Nav;
+            self.dirty = true;
+        }
         // Tabs.
         if let Some((_, key)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
             if let Some((_, w)) = self.selected_worktree() {
@@ -1776,6 +1781,20 @@ impl App {
             .and_then(|p| p.root.parent())
             .map(hive_core::paths::tildify)
             .unwrap_or_else(|| "~/code".into())
+    }
+
+    /// Some pane is holding back a synchronized frame.
+    pub fn sync_pending(&self) -> bool {
+        self.terms.values().any(|t| t.sync_pending())
+    }
+
+    /// Show synchronized frames whose end never arrived.
+    pub fn flush_stale_sync(&mut self) {
+        for t in self.terms.values_mut() {
+            if t.flush_stale_sync() {
+                self.dirty = true;
+            }
+        }
     }
 
     pub fn anything_working(&self) -> bool {

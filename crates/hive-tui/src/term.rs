@@ -1,6 +1,17 @@
 //! A session's client-side terminal emulator.
 
+use std::time::{Duration, Instant};
+
 pub const SCROLLBACK_LINES: usize = 10_000;
+
+/// Synchronized output (DEC mode 2026): the child brackets each frame so a
+/// half-drawn one — cursor parked mid-redraw, hidden then shown — never
+/// reaches the screen. Codex redraws this way on every spinner tick.
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+/// Give up waiting for a frame's end after this long (as terminals do).
+const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+const SYNC_MAX_BYTES: usize = 4 << 20;
 
 /// Captures OSC 52 clipboard writes from the child.
 #[derive(Default)]
@@ -25,6 +36,11 @@ pub struct AttachedTerm {
     pub kitty_flags: u8,
     /// Got at least one replay since (re)attaching.
     pub synced: bool,
+    /// Bytes of an unfinished synchronized frame (or a trailing partial
+    /// `SYNC_BEGIN`), not yet shown.
+    held: Vec<u8>,
+    /// When the current synchronized frame began.
+    sync_since: Option<Instant>,
 }
 
 impl AttachedTerm {
@@ -34,6 +50,8 @@ impl AttachedTerm {
             next_seq: 0,
             synced: false,
             kitty_flags: 0,
+            held: Vec::new(),
+            sync_since: None,
         }
     }
 
@@ -41,8 +59,10 @@ impl AttachedTerm {
         if base_seq != self.next_seq || !self.synced && self.next_seq == 0 {
             let (rows, cols) = self.parser.screen().size();
             self.parser = parser(rows, cols);
+            self.held.clear();
+            self.sync_since = None;
         }
-        self.parser.process(data);
+        self.feed(data);
         // A replay must not re-copy whatever the child copied long ago.
         self.parser.callbacks_mut().clipboard = None;
         self.next_seq = base_seq + data.len() as u64;
@@ -56,8 +76,70 @@ impl AttachedTerm {
             return;
         }
         let skip = self.next_seq.saturating_sub(seq) as usize;
-        self.parser.process(&data[skip..]);
+        self.feed(&data[skip..]);
         self.next_seq = end;
+    }
+
+    /// Process output, holding back synchronized frames until they end.
+    fn feed(&mut self, data: &[u8]) {
+        let mut buf = std::mem::take(&mut self.held);
+        buf.extend_from_slice(data);
+        let mut rest = &buf[..];
+        loop {
+            if self.sync_since.is_some() {
+                match find(rest, SYNC_END) {
+                    Some(i) => {
+                        let end = i + SYNC_END.len();
+                        self.parser.process(&rest[..end]);
+                        rest = &rest[end..];
+                        self.sync_since = None;
+                    }
+                    None if rest.len() > SYNC_MAX_BYTES => {
+                        self.parser.process(rest);
+                        self.sync_since = None;
+                        rest = &[];
+                    }
+                    None => break,
+                }
+            } else {
+                match find(rest, SYNC_BEGIN) {
+                    Some(i) => {
+                        let end = i + SYNC_BEGIN.len();
+                        self.parser.process(&rest[..end]);
+                        rest = &rest[end..];
+                        self.sync_since = Some(Instant::now());
+                    }
+                    None => {
+                        // Keep a trailing partial SYNC_BEGIN for next time.
+                        let keep = (1..SYNC_BEGIN.len())
+                            .rev()
+                            .find(|&n| rest.ends_with(&SYNC_BEGIN[..n]))
+                            .unwrap_or(0);
+                        self.parser.process(&rest[..rest.len() - keep]);
+                        rest = &rest[rest.len() - keep..];
+                        break;
+                    }
+                }
+            }
+        }
+        self.held = rest.to_vec();
+    }
+
+    /// Show a synchronized frame that never finished. True if anything changed.
+    pub fn flush_stale_sync(&mut self) -> bool {
+        match self.sync_since {
+            Some(t) if t.elapsed() >= SYNC_TIMEOUT => {
+                let held = std::mem::take(&mut self.held);
+                self.parser.process(&held);
+                self.sync_since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn sync_pending(&self) -> bool {
+        self.sync_since.is_some()
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -89,6 +171,10 @@ impl AttachedTerm {
         let (r, c) = self.parser.screen().size();
         r as usize * c as usize
     }
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
@@ -164,5 +250,24 @@ mod tests {
         t.apply_scrollback(100, b"fresh", 1);
         assert!(t.parser.screen().contents().starts_with("fresh"));
         assert_eq!(t.kitty_flags, 1);
+    }
+
+    #[test]
+    fn synchronized_frames_wait_for_their_end() {
+        let mut t = AttachedTerm::new(5, 20);
+        t.apply_output(0, b"a\x1b[?2026hb\x1b[?25l");
+        assert!(t.parser.screen().contents().starts_with('a'));
+        assert!(!t.parser.screen().hide_cursor());
+        // Markers split across chunks still count.
+        t.apply_output(t.next_seq, b"c\x1b[?2026");
+        t.apply_output(t.next_seq, b"l\x1b[?20");
+        assert!(t.parser.screen().contents().starts_with("abc"));
+        assert!(!t.sync_pending());
+        t.apply_output(t.next_seq, b"26hd");
+        assert!(t.sync_pending());
+        assert!(t.parser.screen().contents().starts_with("abc"));
+        t.sync_since = Some(Instant::now() - SYNC_TIMEOUT);
+        assert!(t.flush_stale_sync());
+        assert!(t.parser.screen().contents().starts_with("abcd"));
     }
 }

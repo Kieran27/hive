@@ -75,6 +75,8 @@ where
     let mut anim = tokio::time::interval(Duration::from_millis(110));
     anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
+    let mut sync_check = tokio::time::interval(Duration::from_millis(50));
+    sync_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // First layout so attaches use the right size.
     let size = terminal.size()?;
@@ -137,6 +139,7 @@ where
                 app.tick = app.tick.wrapping_add(1);
                 app.dirty = true;
             }
+            _ = sync_check.tick(), if app.sync_pending() => app.flush_stale_sync(),
             _ = housekeeping.tick() => {
                 if app.toast.as_ref().map(|t| t.2.elapsed() > TOAST_TTL).unwrap_or(false) {
                     app.toast = None;
