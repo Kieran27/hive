@@ -50,6 +50,16 @@ enum Cmd {
     },
     /// Check the environment (git, code, agents, nvm, daemon, configs).
     Doctor,
+    /// Rebuild hive from source and install it over this binary.
+    Reinstall {
+        /// Source checkout (defaults to the one this binary was built from).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Restart the daemon afterwards so it runs the new code too (kills
+        /// every session).
+        #[arg(long)]
+        restart_daemon: bool,
+    },
     /// Report an agent hook event to the daemon (run by agent hooks).
     #[command(hide = true)]
     Notify {
@@ -152,6 +162,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             import::import_portal_wt(repo, app, config)
         }
         Some(Cmd::Doctor) => doctor().await,
+        Some(Cmd::Reinstall {
+            path,
+            restart_daemon,
+        }) => reinstall(path, restart_daemon).await,
         Some(Cmd::Notify { .. }) => unreachable!(),
     }
 }
@@ -206,6 +220,46 @@ async fn daemon_cmd(action: DaemonCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn reinstall(path: Option<PathBuf>, restart_daemon: bool) -> Result<()> {
+    let root = match path {
+        Some(p) => absolute(p)?,
+        // crates/hive -> workspace root.
+        None => {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            std::fs::canonicalize(&root).unwrap_or(root)
+        }
+    };
+    let krate = root.join("crates/hive");
+    if !krate.join("Cargo.toml").exists() {
+        bail!(
+            "no hive source at {} (pass --path <checkout>)",
+            root.display()
+        );
+    }
+    println!("installing from {}", hive_core::paths::tildify(&root));
+    let status = std::process::Command::new("cargo")
+        .args(["install", "--locked", "--path"])
+        .arg(&krate)
+        .status()
+        .context("running cargo")?;
+    if !status.success() {
+        bail!("cargo install failed");
+    }
+    if restart_daemon {
+        stop().await?;
+        hive_tui::client::connect_or_spawn(&hive_bin()).await?;
+        println!("daemon restarted");
+    } else if daemon_running().await {
+        println!(
+            "installed. Restart hive to pick up TUI changes; daemon changes need \
+             `hive daemon restart` (kills every session)."
+        );
+    } else {
+        println!("installed.");
+    }
+    Ok(())
 }
 
 async fn stop() -> Result<()> {

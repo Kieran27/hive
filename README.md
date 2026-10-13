@@ -30,6 +30,7 @@ Inspired by [Nebula](https://github.com/AgentSystemLabs/nebula). hive uses the s
 ```sh
 cargo install --path crates/hive      # puts `hive` in ~/.cargo/bin
 hive doctor                           # checks git, code, claude, codex, nvm, nc
+hive reinstall                        # later: rebuild from this checkout (--restart-daemon too)
 ```
 
 ## Quick start
