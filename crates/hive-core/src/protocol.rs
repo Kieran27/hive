@@ -81,6 +81,10 @@ pub enum ClientRequest {
     OpenVscode {
         project: String,
         worktree: PathBuf,
+        /// Open just this package (monorepo sub-folder) instead of the
+        /// project's configured workspace folders.
+        #[serde(default)]
+        package: Option<String>,
     },
     /// Sent by `hive notify` from inside agent hooks.
     Notify(Notify),

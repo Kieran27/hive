@@ -1207,11 +1207,18 @@ impl App {
                 }
             }
             KeyCode::Char('e') => {
+                let package = match self.selected_row() {
+                    Some(Row::Package(pi, _, ki)) => {
+                        Some(self.projects[pi].packages[ki].name.clone())
+                    }
+                    _ => None,
+                };
                 if let Some((p, w)) = self.selected_worktree() {
                     let path = w.path.clone();
                     self.send(ClientRequest::OpenVscode {
                         project: p.id.clone(),
                         worktree: path.clone(),
+                        package,
                     });
                     self.vscode_opened.insert(path);
                     self.ui_dirty = true;

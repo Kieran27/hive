@@ -16,10 +16,18 @@ pub fn workspace_file(project: &str, label: &str) -> PathBuf {
     ))
 }
 
-pub fn workspace_contents(cfg: &ProjectConfig, worktree: &Path, label: &str) -> serde_json::Value {
-    let folders: Vec<_> = cfg
-        .vscode
-        .folders
+/// `package` narrows the workspace to that one package; otherwise the
+/// project's `[vscode] folders` are used.
+pub fn workspace_contents(
+    cfg: &ProjectConfig,
+    worktree: &Path,
+    label: &str,
+    package: Option<&str>,
+) -> serde_json::Value {
+    let pkg_spec = package.map(|p| vec![format!("@{p}")]);
+    let folders: Vec<_> = pkg_spec
+        .as_ref()
+        .unwrap_or(&cfg.vscode.folders)
         .iter()
         .map(|f| {
             let p = cfg.resolve_dir(worktree, Some(f));
@@ -39,10 +47,19 @@ pub fn workspace_contents(cfg: &ProjectConfig, worktree: &Path, label: &str) -> 
     })
 }
 
-pub fn open(cfg: &ProjectConfig, worktree: &Path, label: &str) -> Result<PathBuf> {
-    let file = workspace_file(&cfg.name, label);
+pub fn open(
+    cfg: &ProjectConfig,
+    worktree: &Path,
+    label: &str,
+    package: Option<&str>,
+) -> Result<PathBuf> {
+    let file = match package {
+        Some(pkg) => workspace_file(&format!("{}-{pkg}", cfg.name), label),
+        None => workspace_file(&cfg.name, label),
+    };
     std::fs::create_dir_all(file.parent().unwrap())?;
-    let contents = serde_json::to_string_pretty(&workspace_contents(cfg, worktree, label))?;
+    let contents =
+        serde_json::to_string_pretty(&workspace_contents(cfg, worktree, label, package))?;
     // Rewrite only on change so VS Code doesn't see a modified workspace.
     if std::fs::read_to_string(&file).ok().as_deref() != Some(contents.as_str()) {
         std::fs::write(&file, contents)?;
@@ -76,12 +93,23 @@ mod tests {
     fn title_and_folders() {
         let file: ProjectFile = toml::from_str("[vscode]\nfolders = [\".\", \"@rn\"]\n[[package]]\nname = \"rn\"\npath = \"apps/rn\"\n").unwrap();
         let cfg = ProjectConfig::resolve(Path::new("/repo"), file);
-        let v = workspace_contents(&cfg, Path::new("/w/feat"), "feat/x");
+        let v = workspace_contents(&cfg, Path::new("/w/feat"), "feat/x", None);
         assert_eq!(v["folders"][1]["path"], "/w/feat/apps/rn");
         assert!(v["settings"]["window.title"]
             .as_str()
             .unwrap()
             .starts_with("«feat/x» "));
         assert!(workspace_file("p", "feat/x").ends_with("p-feat-x.code-workspace"));
+    }
+
+    #[test]
+    fn package_only() {
+        let file: ProjectFile = toml::from_str("[vscode]\nfolders = [\".\", \"@rn\"]\n[[package]]\nname = \"rn\"\npath = \"apps/rn\"\n").unwrap();
+        let cfg = ProjectConfig::resolve(Path::new("/repo"), file);
+        let v = workspace_contents(&cfg, Path::new("/w/feat"), "feat/x", Some("rn"));
+        let folders = v["folders"].as_array().unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0]["path"], "/w/feat/apps/rn");
+        assert_eq!(folders[0]["name"], "rn «feat/x»");
     }
 }

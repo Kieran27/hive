@@ -1224,11 +1224,19 @@ impl Daemon {
                     cols,
                     rows,
                 } => self.resize(&session, cols, rows),
-                ClientRequest::OpenVscode { project, worktree } => {
+                ClientRequest::OpenVscode {
+                    project,
+                    worktree,
+                    package,
+                } => {
                     let cfg = self.project_cfg(&project)?;
                     let wt = self.worktree(&project, &worktree)?;
-                    crate::vscode::open(&cfg, &worktree, &wt.label())?;
-                    self.toast(ToastLevel::Info, format!("VS Code: «{}»", wt.label()));
+                    crate::vscode::open(&cfg, &worktree, &wt.label(), package.as_deref())?;
+                    let what = match &package {
+                        Some(pkg) => format!("{pkg} «{}»", wt.label()),
+                        None => format!("«{}»", wt.label()),
+                    };
+                    self.toast(ToastLevel::Info, format!("VS Code: {what}"));
                 }
                 ClientRequest::Notify(n) => self.notify(n),
                 ClientRequest::MarkSeen { session } => self.mark_seen(&session),
