@@ -224,12 +224,27 @@ Add web run targets afterwards; [`examples/web-and-mobile-monorepo.toml`](exampl
 ```
 hive                      open the TUI
 hive add [path]           register a repo
-hive ls                   projects, worktrees, sessions
+hive ls [--json]          projects, worktrees, sessions
 hive init [path]          starter project config
 hive import-portal-wt     convert portal-wt config
 hive doctor               environment check
 hive daemon status|stop|restart|run
 ```
+
+For agents and scripts (each takes `--json` and prints one object;
+exit 0 = ok, 1 = error, 2 = usage). `<worktree>` is a path or branch name.
+
+```
+hive wt new <project> <branch> [--base <ref>] [--mode new|local|remote|detached]
+            [--setup <step,...>] [--env <name>] [--wait]
+hive wt rm <project> <worktree> [--force]
+hive setup <project> <worktree> --steps <step,...> [--env <name>] [--wait]
+hive run <project> <worktree> <target> [--ask name=value ...] [--wait-ports]
+hive stop <project> <worktree> <target>
+```
+
+`wt new --json` prints `{"path", "branch", "slot", "ports", "setup": "ok|failed|running|skipped"}`.
+`run` fails rather than prompting when an `[[run.ask]]` has no default and no `--ask`.
 
 ## Files
 

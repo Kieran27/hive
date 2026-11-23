@@ -287,6 +287,24 @@ pub enum ServerEvent {
         message: String,
     },
     Ok,
+    /// Reply to `CreateWorktree`: the new worktree, and its setup session
+    /// if one was started.
+    WorktreeCreated {
+        project: String,
+        path: PathBuf,
+        slot: u16,
+        setup: Option<String>,
+    },
+    /// Reply to `RunSetup`.
+    SetupStarted {
+        session: String,
+    },
+    /// Reply to `StartRun`: one session per proc, ports keyed by proc name.
+    RunStarted {
+        target: String,
+        sessions: Vec<String>,
+        ports: BTreeMap<String, u16>,
+    },
     GitStatus(GitStatusInfo),
     GitDiff {
         worktree: PathBuf,

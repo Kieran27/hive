@@ -761,6 +761,7 @@ impl Daemon {
     async fn create_worktree(
         self: &Arc<Self>,
         req: CreateWorktree,
+        reply: &Outbox,
         cols: u16,
         rows: u16,
     ) -> Result<()> {
@@ -777,17 +778,31 @@ impl Daemon {
             ToastLevel::Info,
             format!("created {}", hive_core::paths::tildify(&path)),
         );
-        if !req.steps.is_empty()
+        let setup = if !req.steps.is_empty()
             || !cfg.copy_from_main.is_empty()
             || cfg.packages.iter().any(|p| !p.copy_from_main.is_empty())
         {
-            self.run_setup(&req.project, &path, &req.steps, req.env.clone(), cols, rows)?;
-        }
+            Some(
+                self.run_setup(&req.project, &path, &req.steps, req.env.clone(), cols, rows)
+                    .with_context(|| {
+                        format!("created {} but setup did not start", path.display())
+                    })?,
+            )
+        } else {
+            None
+        };
+        let slot = self.worktree(&req.project, &path)?.slot;
+        let _ = reply.send(ServerEvent::WorktreeCreated {
+            project: req.project,
+            path,
+            slot,
+            setup,
+        });
         Ok(())
     }
 
     /// Copy gitignored files from the main checkout, then run setup steps in
-    /// a visible "setup" session.
+    /// a visible "setup" session. Returns the session id.
     fn run_setup(
         self: &Arc<Self>,
         project: &str,
@@ -796,7 +811,7 @@ impl Daemon {
         env: Option<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let cfg = self.project_cfg(project)?;
         let wt = self.worktree(project, worktree)?;
         let mut notes = Vec::new();
@@ -842,8 +857,10 @@ impl Daemon {
         let pty = self.launch(&info, program, args, vec![], cols, rows)?;
         let id = info.id.clone();
         self.register(info, pty);
-        self.broadcast(ServerEvent::Focus { session: id });
-        Ok(())
+        self.broadcast(ServerEvent::Focus {
+            session: id.clone(),
+        });
+        Ok(id)
     }
 
     async fn remove_worktree(
@@ -902,7 +919,11 @@ impl Daemon {
         v
     }
 
-    async fn start_run(self: &Arc<Self>, req: StartRun) -> Result<()> {
+    /// Returns the new session ids and each proc's port.
+    async fn start_run(
+        self: &Arc<Self>,
+        req: StartRun,
+    ) -> Result<(Vec<String>, BTreeMap<String, u16>)> {
         let cfg = self.project_cfg(&req.project)?;
         let wt = self.worktree(&req.project, &req.worktree)?;
         let target = cfg
@@ -963,7 +984,7 @@ impl Daemon {
         }
 
         let shell = self.global.read().unwrap().shell();
-        let mut first = None;
+        let mut ids = Vec::new();
         for p in &target.procs {
             let mut v = vars.clone();
             if let Some(port) = ports_by_proc.get(&p.name) {
@@ -995,13 +1016,15 @@ impl Daemon {
                 self.new_info(&req.project, &req.worktree, kind.clone(), cwd, kind.label());
             info.ports = ports_by_proc.get(&p.name).copied().into_iter().collect();
             let pty = self.launch(&info, program, args, vec![], req.cols, req.rows)?;
-            first.get_or_insert(info.id.clone());
+            ids.push(info.id.clone());
             self.register(info, pty);
         }
-        if let Some(id) = first {
-            self.broadcast(ServerEvent::Focus { session: id });
+        if let Some(id) = ids.first() {
+            self.broadcast(ServerEvent::Focus {
+                session: id.clone(),
+            });
         }
-        Ok(())
+        Ok((ids, ports_by_proc))
     }
 
     fn run_sessions(&self, project: &str, worktree: &Path, target: &str) -> Vec<(String, bool)> {
@@ -1189,18 +1212,26 @@ impl Daemon {
                         remote,
                     });
                 }
-                ClientRequest::CreateWorktree(c) => self.create_worktree(c, cols, rows).await?,
+                ClientRequest::CreateWorktree(c) => {
+                    self.create_worktree(c, reply, cols, rows).await?
+                }
                 ClientRequest::RemoveWorktree {
                     project,
                     path,
                     force,
-                } => self.remove_worktree(&project, path, force).await?,
+                } => {
+                    self.remove_worktree(&project, path, force).await?;
+                    let _ = reply.send(ServerEvent::Ok);
+                }
                 ClientRequest::RunSetup {
                     project,
                     worktree,
                     steps,
                     env,
-                } => self.run_setup(&project, &worktree, &steps, env, cols, rows)?,
+                } => {
+                    let session = self.run_setup(&project, &worktree, &steps, env, cols, rows)?;
+                    let _ = reply.send(ServerEvent::SetupStarted { session });
+                }
                 ClientRequest::SpawnSession(s) => {
                     let id = self.spawn_session(s)?;
                     let _ = reply.send(ServerEvent::Focus { session: id });
@@ -1210,12 +1241,23 @@ impl Daemon {
                     cols,
                     rows,
                 } => self.resume_session(&session, cols, rows)?,
-                ClientRequest::StartRun(r) => self.start_run(r).await?,
+                ClientRequest::StartRun(r) => {
+                    let target = r.target.clone();
+                    let (sessions, ports) = self.start_run(r).await?;
+                    let _ = reply.send(ServerEvent::RunStarted {
+                        target,
+                        sessions,
+                        ports,
+                    });
+                }
                 ClientRequest::StopRun {
                     project,
                     worktree,
                     target,
-                } => self.stop_run(&project, &worktree, &target),
+                } => {
+                    self.stop_run(&project, &worktree, &target);
+                    let _ = reply.send(ServerEvent::Ok);
+                }
                 ClientRequest::KillSession { session } => self.kill_session(&session),
                 ClientRequest::CloseSession { session } => self.close_session(&session),
                 ClientRequest::Input { session, data } => self.input(&session, data),

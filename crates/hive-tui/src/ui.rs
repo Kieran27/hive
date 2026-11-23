@@ -3,10 +3,13 @@
 
 use hive_core::paths::tildify;
 use hive_core::protocol::*;
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 use ratatui::Frame;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
@@ -50,12 +53,60 @@ fn session_dot(s: &SessionInfo, tick: u64) -> Span<'static> {
     status_span(s.status, s.alive, s.group().is_some(), tick)
 }
 
-pub fn tree_offset(app: &App, height: usize) -> usize {
-    if height == 0 || app.sel < height {
-        0
-    } else {
-        app.sel + 1 - height
+/// Keep `offset` where it was unless `sel` would leave the window, and
+/// never leave empty space below the last row.
+pub fn scroll_into_view(offset: usize, sel: usize, height: usize, len: usize) -> usize {
+    if height == 0 {
+        return 0;
     }
+    let mut off = offset.min(len.saturating_sub(height));
+    if sel < off {
+        off = sel;
+    } else if sel >= off + height {
+        off = sel + 1 - height;
+    }
+    off
+}
+
+/// Which tabs fit in `width` starting near `scroll`, keeping `active` in
+/// view. Returns the first visible index and how many fit, given that a
+/// 4-column marker is reserved on each side that has hidden tabs.
+pub fn tab_window(widths: &[u16], active: usize, scroll: usize, width: u16) -> (usize, usize) {
+    const MARK: u16 = 4;
+    let n = widths.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let active = active.min(n - 1);
+    // How many tabs fit from `start`: greedily, then make room for the
+    // right-hand marker if anything is left over.
+    let fits = |start: usize| -> usize {
+        let lead = if start > 0 { MARK } else { 0 };
+        let mut used = vec![lead];
+        for w in &widths[start..] {
+            let next = used.last().unwrap() + w + 1;
+            if next > width {
+                break;
+            }
+            used.push(next);
+        }
+        let mut count = used.len() - 1;
+        if start + count < n {
+            while count > 1 && used[count] + MARK > width {
+                count -= 1;
+            }
+        }
+        count.max(1)
+    };
+    let mut start = scroll.min(active);
+    while start < active && start + fits(start) <= active {
+        start += 1;
+    }
+    // Pull earlier tabs back in if there's room (e.g. after closing some).
+    while start > 0 && start - 1 + fits(start - 1) > active && fits(start - 1) > fits(start) {
+        start -= 1;
+    }
+    (start, fits(start).min(n - start))
 }
 
 /// Compute every rect for this frame (also used before attaching).
@@ -99,6 +150,12 @@ pub fn layout(app: &mut App, area: Rect) {
         width: sidebar.width.saturating_sub(2),
         height: sidebar.height.saturating_sub(2 + footer_h),
     };
+    app.tree_scroll = scroll_into_view(
+        app.tree_scroll,
+        app.sel,
+        tree.height as usize,
+        app.rows.len(),
+    );
     let header = Rect { height: 1, ..main };
     let tabs = Rect {
         y: main.y + 1,
@@ -161,13 +218,40 @@ pub fn layout(app: &mut App, area: Rect) {
         .map(|(i, t)| (tab_label(app, t, i), t.key()))
         .collect();
     app.tab_hits.clear();
+    app.tab_more = [None, None];
+    // dot + spaces around the label
+    let widths: Vec<u16> = labels
+        .iter()
+        .map(|(l, _)| l.chars().count() as u16 + 3)
+        .collect();
+    let active = app.active_tab().map(|t| t.key());
+    let active = labels
+        .iter()
+        .position(|(_, k)| Some(k) == active.as_ref())
+        .unwrap_or(0);
+    let (start, count) = tab_window(
+        &widths,
+        active,
+        app.tab_scroll,
+        tabs.width.saturating_sub(1),
+    );
+    app.tab_scroll = start;
     let mut x = tabs.x + 1;
-    for (label, key) in labels {
-        // dot + spaces around the label
-        let w = label.chars().count() as u16 + 3;
-        if x + w > tabs.x + tabs.width {
-            break;
-        }
+    if start > 0 {
+        app.tab_more[0] = Some((
+            Rect {
+                x,
+                y: tabs.y,
+                width: 3,
+                height: 1,
+            },
+            labels[start - 1].1.clone(),
+            start,
+        ));
+        x += 4;
+    }
+    for (i, (_, key)) in labels.iter().enumerate().skip(start).take(count) {
+        let w = widths[i].min((tabs.x + tabs.width).saturating_sub(x));
         app.tab_hits.push((
             Rect {
                 x,
@@ -175,9 +259,22 @@ pub fn layout(app: &mut App, area: Rect) {
                 width: w,
                 height: 1,
             },
-            key,
+            key.clone(),
         ));
         x += w + 1;
+    }
+    let end = start + count;
+    if end < labels.len() {
+        app.tab_more[1] = Some((
+            Rect {
+                x: (tabs.x + tabs.width).saturating_sub(4),
+                y: tabs.y,
+                width: 4,
+                height: 1,
+            },
+            labels[end].1.clone(),
+            labels.len() - end,
+        ));
     }
 }
 
@@ -271,7 +368,28 @@ fn draw_sidebar(f: &mut Frame, app: &App) {
     }
 
     let h = a.tree.height as usize;
-    let offset = tree_offset(app, h);
+    let offset = app.tree_scroll;
+    // Scrollbar on the sidebar's right border when rows overflow.
+    if app.rows.len() > h && h > 0 {
+        let mut state = ScrollbarState::new(app.rows.len().saturating_sub(h))
+            .position(offset)
+            .viewport_content_length(h);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("┃")
+                .style(Style::default().fg(DIM))
+                .thumb_style(Style::default().fg(if focused { ACCENT } else { Color::Gray })),
+            Rect {
+                x: a.sidebar.x,
+                width: a.sidebar.width,
+                ..a.tree
+            },
+            &mut state,
+        );
+    }
     let width = a.tree.width as usize;
     for (i, row) in app.rows.iter().enumerate().skip(offset).take(h) {
         let y = a.tree.y + (i - offset) as u16;
@@ -462,8 +580,10 @@ fn draw_main(f: &mut Frame, app: &mut App) {
     // Tabs.
     let tabs = app.current_tabs();
     let active = app.active_tab().map(|t| t.key());
-    for (i, (rect, key)) in app.tab_hits.iter().enumerate() {
-        let tab = &tabs[i];
+    for (rect, key) in &app.tab_hits {
+        let Some((i, tab)) = tabs.iter().enumerate().find(|(_, t)| &t.key() == key) else {
+            continue;
+        };
         let is_active = Some(key) == active.as_ref();
         let mut spans = vec![Span::raw(" ")];
         let st = tab
@@ -510,6 +630,17 @@ fn draw_main(f: &mut Frame, app: &mut App) {
                 width: rect.width + 1,
                 ..*rect
             },
+        );
+    }
+    // Hidden tabs: click a marker (or switch tabs) to scroll them in.
+    let mark = Style::default().fg(ACCENT).bold();
+    if let Some((r, _, n)) = &app.tab_more[0] {
+        f.render_widget(Paragraph::new(Span::styled(format!("‹{n}"), mark)), *r);
+    }
+    if let Some((r, _, n)) = &app.tab_more[1] {
+        f.render_widget(
+            Paragraph::new(Span::styled(format!("{n}›"), mark)).alignment(Alignment::Right),
+            *r,
         );
     }
     if tabs.is_empty() && app.selected_worktree().is_some() {
@@ -1464,4 +1595,38 @@ fn draw_new_project(f: &mut Frame, form: &NewProjectForm, area: Rect) {
             ..inner
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_scroll_is_sticky() {
+        // Moving down past the bottom scrolls; moving back up doesn't.
+        assert_eq!(scroll_into_view(0, 12, 10, 30), 3);
+        assert_eq!(scroll_into_view(3, 8, 10, 30), 3);
+        assert_eq!(scroll_into_view(3, 1, 10, 30), 1);
+        // Rows removed: don't leave blank space at the bottom.
+        assert_eq!(scroll_into_view(20, 5, 10, 12), 2);
+        assert_eq!(scroll_into_view(5, 0, 10, 4), 0);
+    }
+
+    #[test]
+    fn tab_window_keeps_active_visible() {
+        let w = [10u16; 10]; // each tab takes 11 columns
+                             // Everything fits.
+        assert_eq!(tab_window(&w[..3], 2, 0, 40), (0, 3));
+        // Active at the far end scrolls right, leaving room for markers.
+        let (start, count) = tab_window(&w, 9, 0, 40);
+        assert!(start + count == 10 && start > 0, "{start} {count}");
+        // Going back to the first tab scrolls home.
+        assert_eq!(tab_window(&w, 0, start, 40).0, 0);
+        // Sticky: a tab already in view doesn't move the window.
+        let (s2, c2) = tab_window(&w, 5, 4, 40);
+        assert!(s2 <= 5 && 5 < s2 + c2);
+        assert_eq!(s2, 4);
+        // A single over-wide tab still shows.
+        assert_eq!(tab_window(&[100], 0, 0, 40), (0, 1));
+    }
 }

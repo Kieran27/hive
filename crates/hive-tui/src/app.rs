@@ -111,6 +111,13 @@ pub struct App {
     /// Pane rects of the visible sessions (one, or one per run proc).
     pub pane_rects: Vec<(String, Rect)>,
     pub tab_hits: Vec<(Rect, String)>,
+    /// `‹ N` / `N ›` markers for tabs scrolled out of view: where they are
+    /// drawn, the tab a click jumps to and how many are hidden.
+    pub tab_more: [Option<(Rect, String, usize)>; 2],
+    /// First visible tab (sticky, so the bar doesn't jump around).
+    pub tab_scroll: usize,
+    /// First visible sidebar row (sticky, kept around the selection).
+    pub tree_scroll: usize,
     pub dirty: bool,
     pub quit: bool,
     pub tick: u64,
@@ -156,6 +163,9 @@ impl App {
             areas: Areas::default(),
             pane_rects: vec![],
             tab_hits: vec![],
+            tab_more: [None, None],
+            tab_scroll: 0,
+            tree_scroll: 0,
             dirty: true,
             quit: false,
             tick: 0,
@@ -382,7 +392,7 @@ impl App {
         self.set_active(s.worktree.clone(), key);
     }
 
-    fn cycle_tab(&mut self, delta: isize) {
+    pub(crate) fn cycle_tab(&mut self, delta: isize) {
         let Some((_, w)) = self.selected_worktree() else {
             return;
         };
@@ -523,7 +533,10 @@ impl App {
                 }
             }
             ServerEvent::Toast { level, message } => self.toast(level, message),
-            ServerEvent::Ok => {}
+            ServerEvent::Ok
+            | ServerEvent::WorktreeCreated { .. }
+            | ServerEvent::SetupStarted { .. }
+            | ServerEvent::RunStarted { .. } => {}
             ServerEvent::GitStatus(info) => self.git_on_status(info),
             ServerEvent::GitDiff {
                 path, staged, text, ..
@@ -1506,8 +1519,26 @@ impl App {
             self.mode = Mode::Nav;
             self.dirty = true;
         }
-        // Tabs.
-        if let Some((_, key)) = self.tab_hits.iter().find(|(r, _)| r.contains(pos)).cloned() {
+        // Tabs: the wheel switches, `‹ N` / `N ›` reveal hidden ones.
+        if self.areas.tabs.contains(pos) {
+            match ev.kind {
+                MouseEventKind::ScrollUp => return self.cycle_tab(-1),
+                MouseEventKind::ScrollDown => return self.cycle_tab(1),
+                _ => {}
+            }
+        }
+        let more = self
+            .tab_more
+            .iter()
+            .flatten()
+            .find(|(r, ..)| r.contains(pos))
+            .map(|(_, key, _)| key.clone());
+        let hit = self
+            .tab_hits
+            .iter()
+            .find(|(r, _)| r.contains(pos))
+            .map(|(_, key)| key.clone());
+        if let Some(key) = more.or(hit) {
             if let Some((_, w)) = self.selected_worktree() {
                 let path = w.path.clone();
                 self.set_active(path, key);
@@ -1521,7 +1552,7 @@ impl App {
                 MouseEventKind::ScrollUp => self.move_sel(-1),
                 MouseEventKind::ScrollDown => self.move_sel(1),
                 _ => {
-                    let offset = crate::ui::tree_offset(self, tree.height as usize);
+                    let offset = self.tree_scroll;
                     let i = offset + (ev.row - tree.y) as usize;
                     if i < self.rows.len() {
                         if self.sel == i {

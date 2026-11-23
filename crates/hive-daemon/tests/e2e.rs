@@ -81,6 +81,8 @@ async fn full_flow() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().to_path_buf();
     std::env::set_var("HIVE_HOME", &home);
+    // Inside a hive session HIVE_SOCKET points at the live daemon.
+    std::env::set_var("HIVE_SOCKET", home.join("daemon.sock"));
     std::env::set_var("SHELL", "/bin/sh");
 
     // A repo with a run target that serves a port and a setup step.

@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use hive_core::protocol::{ClientRequest, Notify, ServerEvent};
 
 mod import;
+mod ops;
 
 #[derive(Parser)]
 #[command(
@@ -29,7 +30,22 @@ enum Cmd {
     Add { path: Option<PathBuf> },
     /// List projects, worktrees and sessions.
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Print one JSON object instead.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create and remove worktrees.
+    Wt {
+        #[command(subcommand)]
+        action: ops::WtCmd,
+    },
+    /// Run setup steps in a worktree.
+    Setup(ops::SetupArgs),
+    /// Start (or restart) a run target in a worktree.
+    Run(ops::RunArgs),
+    /// Stop a run target in a worktree.
+    Stop(ops::StopArgs),
     /// Write a starter project config to ~/.config/hive/projects/<name>.toml.
     Init {
         path: Option<PathBuf>,
@@ -153,7 +169,16 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("added {}", path.display());
             Ok(())
         }
-        Some(Cmd::List) => list().await,
+        Some(Cmd::List { json }) => list(json).await,
+        Some(Cmd::Wt { action }) => {
+            let json = match &action {
+                ops::WtCmd::New { json, .. } | ops::WtCmd::Rm { json, .. } => *json,
+            };
+            ops::finish(json, ops::wt(&hive_bin(), action)).await
+        }
+        Some(Cmd::Setup(a)) => ops::finish(a.json, ops::setup(&hive_bin(), a)).await,
+        Some(Cmd::Run(a)) => ops::finish(a.json, ops::run(&hive_bin(), a)).await,
+        Some(Cmd::Stop(a)) => ops::finish(a.json, ops::stop(&hive_bin(), a)).await,
         Some(Cmd::Init { path, in_repo }) => import::init(
             &absolute(path.unwrap_or_else(|| PathBuf::from(".")))?,
             in_repo,
@@ -302,8 +327,12 @@ async fn snapshot() -> Result<(
     }
 }
 
-async fn list() -> Result<()> {
+async fn list(json: bool) -> Result<()> {
     let (projects, sessions) = snapshot().await?;
+    if json {
+        println!("{}", ops::list_json(&projects, &sessions));
+        return Ok(());
+    }
     for p in projects {
         println!("{}  {}", p.name, hive_core::paths::tildify(&p.root));
         if let Some(e) = &p.config_error {
